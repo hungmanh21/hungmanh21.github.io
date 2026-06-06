@@ -10,8 +10,8 @@ description: "Scale, zero-point, symmetric vs. asymmetric, per-group calibration
 
 
 <div style="display:flex;flex-direction:column;gap:14px;margin:24px 0 28px;font-family:system-ui,sans-serif;font-size:13px;max-width:560px;">
-  <div style="flex:1;min-width:220px;background:#fffffc;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Questions this post answers</div>
+  <div style="flex:1;min-width:220px;background:#eff6ff;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #3b82f6;padding-left:8px;">Questions this post answers</div>
     <ul style="margin:0;padding-left:16px;color:#1e293b;line-height:1.8;">
       <li>What exactly happens when a weight is quantized — where does the error come from?</li>
       <li>How much memory does a model use, and does quantization also speed up inference?</li>
@@ -19,8 +19,8 @@ description: "Scale, zero-point, symmetric vs. asymmetric, per-group calibration
       <li>What is calibration granularity, and why does per-group outperform per-tensor for weights?</li>
     </ul>
   </div>
-  <div style="flex:1;min-width:220px;background:#fffffc;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Prerequisites</div>
+  <div style="flex:1;min-width:220px;background:#f5f3ff;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #7c3aed;padding-left:8px;">Prerequisites</div>
     <ul style="margin:0;padding-left:16px;color:#1e293b;line-height:1.8;">
       <li>IEEE 754 floating-point basics (sign, exponent, mantissa)</li>
       <li>PyTorch tensor operations</li>
@@ -418,7 +418,7 @@ Every quantization scheme discussed below is a choice about which of $W$ and $X$
 
 <div style="display:flex;gap:14px;margin:20px 0;flex-wrap:wrap;font-family:system-ui,sans-serif;font-size:13px;">
   <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Weights</div>
+    <div style="font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #94a3b8;padding-left:8px;">Weights</div>
     <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px;color:#334155;">
       <li>✓ Static — computed once, offline</li>
       <li>✓ No input dependency</li>
@@ -428,7 +428,7 @@ Every quantization scheme discussed below is a choice about which of $W$ and $X$
     </ul>
   </div>
   <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Activations</div>
+    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #3b82f6;padding-left:8px;">Activations</div>
     <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px;color:#334155;">
       <li>⚡ Dynamic — depend on input tokens</li>
       <li>⚡ Requires static or dynamic calibration</li>
@@ -438,7 +438,7 @@ Every quantization scheme discussed below is a choice about which of $W$ and $X$
     </ul>
   </div>
   <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #caffbf;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#14532d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">KV Cache</div>
+    <div style="font-weight:700;color:#14532d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #16a34a;padding-left:8px;">KV Cache</div>
     <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px;color:#334155;">
       <li>📈 Grows with sequence length</li>
       <li>📈 Written + read every generation step</li>
@@ -804,7 +804,7 @@ $$
 
 <div style="display:flex;gap:14px;margin:20px 0;flex-wrap:wrap;font-family:system-ui,sans-serif;font-size:13px;">
   <div style="flex:1;min-width:220px;background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Asymmetric</div>
+    <div style="font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #94a3b8;padding-left:8px;">Asymmetric</div>
     <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
       <li>Two params: scale (FP16) + zero-point (INT8/FP16)</li>
       <li>Covers any range $[x_\text{min}, x_\text{max}]$ exactly</li>
@@ -813,7 +813,7 @@ $$
     </ul>
   </div>
   <div style="flex:1;min-width:220px;background:#fffffc;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Symmetric — preferred for weights</div>
+    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #7c3aed;padding-left:8px;">Symmetric — preferred for weights</div>
     <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
       <li>One param: scale (FP16) only, $z=0$</li>
       <li>Wastes 1 negative level (−128 unused for INT8)</li>
@@ -824,7 +824,9 @@ $$
 </div>
 
 
-> **Relative error explodes on small values.** Relative error ≈ $s / (2|x|)$. When one outlier at 5.0 sets the scale for a tensor where 99% of values are in [−0.3, 0.3], those small values get 17× inflated error. Per-tensor symmetric quantization on LLM activations almost always fails for this reason — activations have channel-wise outliers.
+> **Relative error explodes on small values.** Relative error ≈ $s / (2\lvert x \rvert)$.
+>
+> When one outlier at 5.0 sets the scale for a tensor where 99% of values are in [−0.3, 0.3], those small values get 17× inflated error. Per-tensor symmetric quantization on LLM activations almost always fails for this reason — activations have channel-wise outliers.
 {: .prompt-danger }
 
 
@@ -1103,6 +1105,401 @@ print(f"per-group   RMSE={rmse(W, dq_g):.4f}")  # ~0.0031
 ---
 
 
+## 6. Calibration Range Methods
+
+
+*Granularity decides how many scales you compute — but what rule do you use to pick each $[x_\text{min}, x_\text{max}]$ in the first place?*
+
+
+The scale formula $s = (x_\text{max} - x_\text{min}) / (2^b - 1)$ takes a range as input. Different methods for choosing that range make very different accuracy–clipping tradeoffs.
+
+
+### Overview
+
+
+<div style="display:flex;gap:14px;margin:20px 0;flex-wrap:wrap;font-family:system-ui,sans-serif;font-size:13px;">
+  <div style="flex:1;min-width:200px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;border-left:3px solid #94a3b8;padding-left:8px;">Min/Max</div>
+    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
+      <li>Range = [min(x), max(x)]</li>
+      <li>✓ No calibration data needed</li>
+      <li>✗ One outlier blows up the scale</li>
+      <li>✗ Worst accuracy at INT4</li>
+    </ul>
+  </div>
+  <div style="flex:1;min-width:200px;background:#eff6ff;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;border-left:3px solid #3b82f6;padding-left:8px;">Percentile</div>
+    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
+      <li>Range = [p%, 100−p%] of values</li>
+      <li>✓ Clips tails, robust to outliers</li>
+      <li>✗ Hyperparameter p to tune</li>
+      <li>Needs calibration set</li>
+    </ul>
+  </div>
+  <div style="flex:1;min-width:200px;background:#f5f3ff;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;border-left:3px solid #7c3aed;padding-left:8px;">MSE</div>
+    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
+      <li>Minimize $\mathbb{E}[(x - \hat{x})^2]$</li>
+      <li>✓ Optimal grid spacing</li>
+      <li>✗ Requires calibration data</li>
+      <li>✗ Costlier (grid search)</li>
+    </ul>
+  </div>
+  <div style="flex:1;min-width:200px;background:#f0fdf4;border:1px solid #caffbf;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#14532d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;border-left:3px solid #16a34a;padding-left:8px;">KL Divergence</div>
+    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
+      <li>Minimize KL(P‖Q) over clipped dist.</li>
+      <li>✓ Preserves distribution shape</li>
+      <li>✗ Requires calibration data</li>
+      <li>✗ Costlier (histogram + search)</li>
+    </ul>
+  </div>
+</div>
+
+
+---
+
+
+### Min/Max
+
+
+The range is taken directly from the observed minimum and maximum of the tensor (or calibration batch):
+
+
+$$
+x_\text{min} = \min(x), \qquad x_\text{max} = \max(x)
+$$
+
+
+The scale covers every value exactly — zero clipping error. But one outlier (e.g. a weight at 5.0 while 99% of values are in [−0.3, 0.3]) sets a coarse grid that crushes the majority of values into a few bins. Min/max is the default for **weight-only** scenarios where no calibration data is available and the alternative is complexity with no accuracy gain worth measuring.
+
+
+> **Works for weights, risky for activations.** Weight distributions are stable across inputs and rarely have pathological outliers. Activation ranges shift with every token — a single calibration batch with an extreme input inflates the scale permanently.
+{: .prompt-warning }
+
+
+---
+
+
+### Percentile
+
+
+Instead of the absolute extremes, use the $\alpha$-th and $(1{-}\alpha)$-th percentiles:
+
+
+$$
+x_\text{min} = \text{percentile}(x,\ \alpha), \qquad x_\text{max} = \text{percentile}(x,\ 1 - \alpha)
+$$
+
+
+Values outside the clipped range are **clamped** to $x_\text{min}$ or $x_\text{max}$ before quantization. Common choices: $\alpha = 0.001$ (clip 0.1% per tail) or $\alpha = 0.0001$ for smoother activations. Lower $\alpha$ → less clipping, closer to min/max. Higher $\alpha$ → more clipping, finer grid for the bulk of the distribution.
+
+
+<!-- Percentile clipping diagram -->
+<svg viewBox="0 0 600 170" xmlns="http://www.w3.org/2000/svg"
+     style="width:100%;max-width:640px;display:block;margin:18px auto;font-family:system-ui,sans-serif;background:#fffffc;border-radius:10px;border:1px solid #e2e8f0;">
+
+
+  <!-- Bell curve fill -->
+  <path d="M 40,130 C 60,128 85,122 110,112 C 135,100 155,83 175,65 C 190,51 205,41 220,35 C 235,29 248,27 260,26 C 272,27 285,29 300,35 C 315,41 330,51 345,65 C 365,83 385,100 410,112 C 435,122 460,128 480,130"
+        fill="#e2e8f0" fill-opacity="0.6" stroke="none"/>
+
+
+  <!-- Clipped tails (filled red) -->
+  <path d="M 40,130 C 60,128 85,122 110,112 C 120,106 128,100 135,94 L 135,130 Z"
+        fill="#ffadad" fill-opacity="0.7"/>
+  <path d="M 385,94 C 392,100 400,106 410,112 C 435,122 460,128 480,130 L 480,130 L 385,130 Z"
+        fill="#ffadad" fill-opacity="0.7"/>
+
+
+  <!-- Bell curve stroke -->
+  <path d="M 40,130 C 60,128 85,122 110,112 C 135,100 155,83 175,65 C 190,51 205,41 220,35 C 235,29 248,27 260,26 C 272,27 285,29 300,35 C 315,41 330,51 345,65 C 365,83 385,100 410,112 C 435,122 460,128 480,130"
+        fill="none" stroke="#1e293b" stroke-width="2"/>
+
+
+  <!-- Clip boundary lines -->
+  <line x1="135" y1="20" x2="135" y2="135" stroke="#be123c" stroke-width="1.8" stroke-dasharray="5,3"/>
+  <line x1="385" y1="20" x2="385" y2="135" stroke="#be123c" stroke-width="1.8" stroke-dasharray="5,3"/>
+
+
+  <!-- Labels -->
+  <text x="135" y="15" text-anchor="middle" font-size="11" font-weight="700" fill="#be123c">α percentile</text>
+  <text x="385" y="15" text-anchor="middle" font-size="11" font-weight="700" fill="#be123c">(1−α) percentile</text>
+
+
+  <!-- Tail labels -->
+  <text x="87"  y="148" text-anchor="middle" font-size="10" fill="#be123c" font-weight="600">clipped</text>
+  <text x="432" y="148" text-anchor="middle" font-size="10" fill="#be123c" font-weight="600">clipped</text>
+
+
+  <!-- Kept region label -->
+  <text x="260" y="148" text-anchor="middle" font-size="10" fill="#14532d" font-weight="600">quantized range</text>
+
+
+  <!-- Baseline -->
+  <line x1="30" y1="132" x2="495" y2="132" stroke="#94a3b8" stroke-width="1"/>
+</svg>
+
+
+The red tails are clamped — clipping error for those values, but the bulk of the distribution gets a much finer grid.
+
+
+---
+
+
+### MSE Calibration
+
+
+Search for the clipping bound $\alpha$ that minimizes mean-squared reconstruction error over a calibration set:
+
+
+$$
+\alpha^* = \arg\min_\alpha\ \mathbb{E}\!\left[\left(x - Q_\alpha(x)\right)^2\right]
+$$
+
+
+where $Q_\alpha$ is the quantize→dequantize round-trip with range clipped to $[-\alpha, \alpha]$ (symmetric) or $[x_\text{min}^\alpha, x_\text{max}^\alpha]$ (asymmetric). In practice this is a one-dimensional grid search over $\alpha$ on a small calibration batch (~128–512 samples).
+
+
+The MSE decomposes into two opposing terms:
+
+
+$$
+\text{MSE} = \underbrace{\text{clipping error}}_{\text{values outside } \alpha \text{ are clamped}} + \underbrace{\text{rounding error}}_{\text{values inside are rounded to grid}}
+$$
+
+
+Shrinking $\alpha$ reduces rounding error (finer grid for the same range) but increases clipping error. The optimal $\alpha^*$ is where the two are balanced.
+
+
+<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;font-size:13px;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6366f1;margin-bottom:8px;">MSE · Clipping vs. Rounding Decomposition</div>
+
+
+$$
+\text{MSE}(\alpha) = \underbrace{\frac{\alpha^2}{3 \cdot (2^b - 1)^2}}_{\text{rounding}} \cdot N_\text{in} \;+\; \underbrace{\sum_{|x_i| > \alpha} (|x_i| - \alpha)^2}_{\text{clipping}}
+$$
+
+
+  <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
+    $N_\text{in}$ — number of values inside the clipped range &nbsp;·&nbsp; $b$ — bit-width &nbsp;·&nbsp; $\alpha$ — clip threshold (symmetric case)
+  </div>
+</div>
+
+
+```python
+import torch
+
+
+def mse_calibrate(x: torch.Tensor, bits: int = 8, steps: int = 200):
+    """Search for the symmetric clip threshold alpha* that minimises MSE."""
+    q_max = 2**(bits - 1) - 1
+    best_alpha, best_mse = x.abs().max().item(), float("inf")
+
+
+    for i in range(1, steps + 1):
+        alpha = x.abs().max().item() * i / steps
+        scale = alpha / q_max
+        x_clipped = x.clamp(-alpha, alpha)
+        x_q  = torch.clamp(torch.round(x_clipped / scale), -q_max, q_max)
+        x_dq = scale * x_q.float()
+        mse  = (x - x_dq).pow(2).mean().item()
+        if mse < best_mse:
+            best_mse, best_alpha = mse, alpha
+
+
+    return best_alpha
+```
+
+
+MSE calibration is the default in **GPTQ**, **AWQ**, and most post-training quantization pipelines because it is cheap (one forward pass + grid search) and reliably outperforms min/max.
+
+
+---
+
+
+### KL Divergence Calibration
+
+
+Instead of minimising reconstruction error per element, minimise the information loss between the original distribution $P$ and the quantized distribution $Q$:
+
+
+$$
+\alpha^* = \arg\min_\alpha\ D_\text{KL}(P \,\|\, Q_\alpha)
+= \arg\min_\alpha \sum_i P(i) \log \frac{P(i)}{Q_\alpha(i)}
+$$
+
+
+Both $P$ and $Q_\alpha$ are estimated as histograms over the calibration set. $Q_\alpha$ bins the clipped-and-quantized values and renormalizes them back to the original histogram's support. KL divergence penalizes missing probability mass more strongly than MSE — if the quantized distribution puts zero probability where the original has nonzero probability, the divergence is infinite.
+
+
+**When KL beats MSE:** distributions with heavy tails where a few large values carry most of the signal (e.g., softmax attention scores before masking). KL preserves the relative shape of the distribution, not just element-wise reconstruction. TensorRT's legacy INT8 calibration uses KL by default for this reason.
+
+
+```python
+import torch
+import numpy as np
+
+
+def kl_calibrate(x: torch.Tensor, bits: int = 8, num_bins: int = 2048, steps: int = 100):
+    """Find the clip threshold alpha* that minimises KL(P||Q)."""
+    x_np = x.float().numpy().ravel()
+    abs_max = np.abs(x_np).max()
+
+
+    hist, bin_edges = np.histogram(x_np, bins=num_bins, range=(-abs_max, abs_max))
+    hist = hist.astype(np.float64)
+    hist /= hist.sum()                   # reference distribution P
+
+
+    best_alpha, best_kl = abs_max, float("inf")
+
+
+    for i in range(steps, 0, -1):
+        alpha = abs_max * i / steps
+        num_q_levels = 2**bits - 1
+
+
+        # Clip P to [-alpha, alpha] and renormalize → P_clipped
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        mask = np.abs(bin_centers) <= alpha
+        p_clipped = hist.copy()
+        p_clipped[~mask] = 0.0
+        if p_clipped.sum() < 1e-12:
+            continue
+        p_clipped /= p_clipped.sum()
+
+
+        # Quantize bin centers, build Q histogram
+        scale = alpha / (num_q_levels // 2)
+        q_indices = np.clip(np.round(bin_centers[mask] / scale).astype(int),
+                            -(num_q_levels // 2), num_q_levels // 2)
+        q_hist = np.zeros(num_bins)
+        for idx, q in zip(np.where(mask)[0], q_indices):
+            q_hist[idx] += p_clipped[idx]
+        # Spread quantized mass back over bins that map to the same level
+        q_dist = np.zeros(num_bins)
+        for level in np.unique(q_indices):
+            bins_at_level = np.where(mask)[0][q_indices == level]
+            if len(bins_at_level):
+                q_dist[bins_at_level] = q_hist[bins_at_level].sum() / len(bins_at_level)
+        if q_dist.sum() < 1e-12:
+            continue
+        q_dist /= q_dist.sum()
+
+
+        # KL — only where both distributions have mass
+        nz = (p_clipped > 0) & (q_dist > 0)
+        kl = (p_clipped[nz] * np.log(p_clipped[nz] / q_dist[nz])).sum()
+        if kl < best_kl:
+            best_kl, best_alpha = kl, alpha
+
+
+    return best_alpha
+```
+
+
+---
+
+
+### Comparison
+
+
+<div style="overflow-x:auto;margin:16px 0;">
+<table style="border-collapse:collapse;width:100%;font-size:13px;font-family:system-ui,sans-serif;">
+  <thead>
+    <tr style="background:#f1f5f9;">
+      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Method</th>
+      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Calibration data</th>
+      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Outlier robustness</th>
+      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Cost</th>
+      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Typical use</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">Min/Max</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">None</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#7f1d1d;">Poor</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Trivial</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Static weights, fast prototyping</td>
+    </tr>
+    <tr style="background:#a0c4ff20;">
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">Percentile</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Small batch</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#78350f;">Good</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Low</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Activations with known tail behavior</td>
+    </tr>
+    <tr style="background:#bdb2ff20;">
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">MSE</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Small batch</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#14532d;">Best</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Medium (grid search)</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">W4 weights — GPTQ, AWQ default</td>
+    </tr>
+    <tr style="background:#caffbf40;">
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">KL Divergence</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Small batch</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#14532d;">Best</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Medium (histogram)</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Activations — TensorRT INT8 default</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+> **Practical recommendation.** For W4 weight quantization, MSE with a 128–512 sample calibration set is the standard. For activation quantization (W8A8), KL divergence or percentile with a representative calibration set outperforms min/max significantly at INT8. Min/max is only competitive for static weights at INT8 where outliers are mild.
+{: .prompt-tip }
+
+
+---
+
+
+### Practice Question
+
+
+**Q — You are calibrating an LLM activation tensor for INT8. The distribution has 99.9% of values in [−1, 1] and 0.1% of outliers up to ±8.0. Which method is worst and which is best, and why?**
+
+
+<details>
+<summary>💡 Hints</summary>
+
+
+<div style="background:#fdffb6;border:1px solid #fcd34d;border-radius:8px;padding:14px 16px;margin-top:8px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
+<strong>Hint 1:</strong> With min/max, what does the scale become? With 256 INT8 levels spread over [−8, 8], what is the grid spacing for values in [−1, 1]?<br><br>
+<strong>Hint 2:</strong> Percentile, MSE, and KL would all clip the 0.1% tail to ±~1. What error do they pay for those clipped values, and how does that compare to the error saved for the 99.9%?
+</div>
+</details>
+
+
+<details>
+<summary>✅ Answer</summary>
+
+
+<div style="background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-top:8px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
+
+
+<strong>Worst: min/max. Best: MSE or KL (roughly tied here).</strong>
+
+
+<p style="margin-top:8px;">Min/max sets range [−8, 8]. INT8 has 256 levels over 16 units: grid spacing = 16/255 ≈ 0.063. For the 99.9% of values in [−1, 1], every value is quantized with up to 0.031 error — tolerable. But the 0.1% outliers at ±8.0 pull the scale coarse enough that the bulk of the distribution effectively loses ~2 bits of resolution.</p>
+
+
+<p>Percentile/MSE/KL all clip the 0.1% tail to roughly ±1. The clipping error on those 0.1% values is at most 7.0 (absolute), but the contribution to mean error is small (0.001 × 7 = 0.007). In exchange, the grid spacing drops to 2/255 ≈ 0.008 — an 8× finer grid for the 99.9% majority. The net MSE is dramatically lower.</p>
+
+
+<p>KL divergence is particularly suited here: it assigns infinite penalty to wiping out probability mass, so it clips exactly to the point where the tail mass becomes negligible relative to the core distribution — typically very close to the MSE optimum for this type of distribution.</p>
+
+
+</div>
+</details>
+
+
+---
+
+
 ## Putting It All Together
 
 
@@ -1146,6 +1543,15 @@ print(f"per-group   RMSE={rmse(W, dq_g):.4f}")  # ~0.0031
     </div>
 
 
+    <div style="display:flex;gap:12px;align-items:flex-start;">
+      <div style="background:#a0c4ff;color:#1e3a8a;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0;margin-top:1px;">5</div>
+      <div>
+        <div style="font-weight:700;color:#1e293b;margin-bottom:2px;">The range-selection method matters as much as the bit-width</div>
+        <div style="color:#64748b;font-size:12px;">Min/max is free but vulnerable to a single outlier. Percentile clips tails with a tunable threshold. MSE finds the clip bound that balances rounding vs. clipping error — the standard for W4 weight calibration (GPTQ, AWQ). KL divergence minimises information loss between the original and quantized distributions — TensorRT's INT8 default for activations. For activations with 0.1% outliers at 8× the typical magnitude, the switch from min/max to MSE/KL can recover 2 bits of effective precision.</div>
+      </div>
+    </div>
+
+
   </div>
 </div>
 
@@ -1157,6 +1563,10 @@ print(f"per-group   RMSE={rmse(W, dq_g):.4f}")  # ~0.0031
 
 
 - Maarten Grootendorst, [A Visual Guide to Quantization](https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-quantization) — approachable visual walkthrough of quantization concepts; good companion read for the math in Section 4.
+- NVIDIA TensorRT, [Post-Training Quantization Using Calibration](https://archive.docs.nvidia.com/tensorrt/tensorrt-861/developer-guide/index.html#enable_int8_c) — TensorRT 8.6 documentation on INT8 calibration, including the KL-divergence calibration algorithm.
+- Hao Wu et al., [Integer Quantization for Deep Learning Inference: Principles and Empirical Evaluation](https://arxiv.org/abs/2004.09602) — NVIDIA paper covering quantization parameter choices including calibration range methods across vision, speech, and language models.
+
+
 
 
 
