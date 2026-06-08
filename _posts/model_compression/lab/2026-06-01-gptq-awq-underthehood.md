@@ -22,7 +22,7 @@ math: true
   <div style="background:#fffffc;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
     <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Prerequisites</div>
     <ul style="margin:0;padding-left:16px;color:#1e293b;line-height:1.8;">
-      <li><a href="/posts/gptq-awq/">GPTQ and AWQ: high-level algorithms</a> — read first</li>
+      <li><a href="/posts/quantization-2/">GPTQ and AWQ: high-level algorithms</a> — read first</li>
       <li>PyTorch <code>nn.Module</code>, <code>register_buffer</code>, forward hooks</li>
       <li>Per-group INT4 quantization: scale, zero-point, <code>group_size=128</code></li>
       <li>Transformer block structure: QKV attention + SwiGLU FFN</li>
