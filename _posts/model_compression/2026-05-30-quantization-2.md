@@ -498,7 +498,7 @@ The scale $s_i^*$ is fused into the weight matrix at export. No Hessian inversio
 
 *What does each config knob actually control, and which ones move accuracy most?*
 
-> **Illustrative, not copy-paste.** The `quantize()` signature and `calib_data` handling differ across AutoAWQ versions — verify against your installed `autoawq`. For runnable, end-to-end code see [Lab 2 — GPTQ & AWQ under the hood](/posts/lab2-gptq-awq-underthehood/).
+> **Illustrative, not copy-paste.** The `quantize()` signature and `calib_data` handling differ across AutoAWQ versions — verify against your installed `autoawq`. For runnable, end-to-end code see [Lab 2 — GPTQ & AWQ under the hood](/posts/gptq-awq-underthehood/).
 {: .prompt-info }
 
 ```python

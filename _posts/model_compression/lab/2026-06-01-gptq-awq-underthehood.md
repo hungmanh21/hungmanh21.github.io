@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "Lab02: AWQ and GPTQ Under the Hood: Inside the Transformer Block Loop"
-date: 2026-06-07 09:00:00 +0000
+date: 2026-06-01 09:00:00 +0000
 categories: [Model Compression, Quantization, Lab]
 tags: [quantization, awq, gptq, wqlinear, int4, w4a16, implementation, qwen3, llm]
 math: true
@@ -264,8 +264,8 @@ Two details map directly onto the loss column above. Groups 1 and 3 set `module2
 
 *Why does the quantized model hold uint8 buffers when the compression target is INT4 — and what does the forward pass look like?*
 
-
-> For a hands-on walkthrough of INT4 packing and unpacking from scratch, see [Lab 1: W4A16 from Scratch](/posts/lab1-w4a16-scratch/).
+  
+> For a hands-on walkthrough of INT4 packing and unpacking from scratch, see [Lab 1: W4A16 from Scratch](/posts/w4a16-scratch/).
 {: .prompt-tip }
 
 
