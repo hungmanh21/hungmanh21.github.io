@@ -5,28 +5,53 @@ date: 2026-05-25 00:00:00 +0000
 categories: [Model Compression]
 tags: [quantization, floating-point, bfloat16, fp8, fp4, kv-cache, gpu-memory, arithmetic-intensity]
 math: true
-description: "A ground-up guide to floating-point formats, GPU memory arithmetic, and KV cache sizing — the three mental models every LLM compression practitioner needs before touching a quantization knob."
+description: "BF16 vs FP16, KV cache sizing, and INT8 vs FP8 by batch size — the floating-point formats and GPU-memory arithmetic behind every LLM quantization decision."
 ---
 
 
-**This post answers:**
-- Why does BF16 avoid overflow while FP16 doesn't, even though both are 16 bits?
-- How much VRAM does a 7B model actually need at serving time — weights plus KV cache?
-- Why does KV cache memory grow linearly with batch size and sequence length — and can easily dwarf the weights?
-- Why does INT8 help at batch=1 but FP8 is the right tool at batch=64?
-- What is microscaling and why does it make FP4 practical on Blackwell?
+*What you cannot measure in bytes, you cannot compress.*
 
 
-Before you touch a single quantization knob, three mental models need to be solid: **how weights are stored in bits**, **how much memory they demand at serving time**, and **where that memory lives on the GPU**. Everything else in model compression follows from these.
+<!-- Opening block: questions + prerequisites — stacked vertically -->
+<div style="display:flex;flex-direction:column;gap:14px;margin:24px 0 28px;font-family:system-ui,sans-serif;font-size:13px;">
+  <div style="background:#fffffc;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #60a5fa;padding-left:8px;">Questions this post answers</div>
+    <ul style="margin:0;padding-left:16px;color:#1e293b;line-height:1.8;">
+      <li>If FP16 and BF16 are both 16 bits, why does FP16 overflow to NaN while BF16 trains fine?</li>
+      <li>A 7B model is "7 GB in INT8" — so why does it OOM at batch 8?</li>
+      <li>Why does the KV cache grow linearly with batch and sequence length, and dwarf the weights?</li>
+      <li>Why does INT8 buy throughput at batch=1 but do nothing at batch=64?</li>
+      <li>What is microscaling, and why does it make FP4 practical on Blackwell?</li>
+    </ul>
+  </div>
+  <div style="background:#fffffc;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #c4b5fd;padding-left:8px;">Prerequisites</div>
+    <ul style="margin:0;padding-left:16px;color:#1e293b;line-height:1.8;">
+      <li>IEEE 754 floating-point basics (sign, exponent, mantissa)</li>
+      <li>Transformer architecture (layers, attention heads, KV cache)</li>
+      <li>Basic GPU concepts (VRAM, HBM bandwidth)</li>
+    </ul>
+  </div>
+</div>
+
+
+Before we touch a single quantization knob, three mental models have to be solid: **how a weight is stored in bits**, **how many bytes it demands at serving time**, and **where those bytes live on the GPU**. Let's chase each one through a figure — every compression decision later in the curriculum falls out of these three.
 
 
 ---
 
 
-## 1. How Numerical Values Are Represented
+## 1. How are numerical values stored in bits?
 
 
-Every parameter in a neural network is a binary number. IEEE 754 defines the layout as three fields:
+*If FP16 and BF16 are both 16 bits, why does one overflow to NaN and the other train fine?*
+
+
+Every parameter is a binary number, and IEEE 754 carves those bits into three fields:
+
+
+<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#1e3a8a;margin-bottom:8px;">Formula · IEEE 754 value</div>
 
 
 $$
@@ -34,18 +59,21 @@ $$
 $$
 
 
-- **S** (1 bit) — sign
-- **E** (exponent bits) — controls *dynamic range*: how large or small numbers can get
-- **M** (mantissa bits) — controls *precision*: how many distinct values fit in a given range
+  <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
+    <strong>S</strong> (1 bit) — sign.
+    <strong>E</strong> (exponent bits) — sets <em>dynamic range</em>: how large or small a number can get.
+    <strong>M</strong> (mantissa bits) — sets <em>precision</em>: how many distinct values fit inside that range.
+  </div>
+</div>
 
 
-The design tension is constant: **more exponent bits → wider range, fewer mantissa bits → coarser precision**.
+The whole story of every format is one fixed tension: **spend bits on the exponent and you buy range; spend them on the mantissa and you buy precision.** Sixteen bits, eight bits, four bits — the question is always the same split. Let's watch three 16-bit formats make three different bets.
 
 
-### FP32 / FP16 / BF16
+### Why does FP16 overflow where BF16 survives?
 
 
-The three formats differ entirely in how they split their bit budget.
+*Same 16 bits — so the difference has to be in how they split them.*
 
 
 <div style="font-family:system-ui,sans-serif; font-size:13px; line-height:1.6; margin:20px 0;">
@@ -90,7 +118,10 @@ The three formats differ entirely in how they split their bit budget.
 </div>
 
 
-**The FP16 overflow story.** A 5-bit exponent caps FP16 at 65,504. LLM gradient norms routinely exceed this after thousands of training steps. When a value overflows to `NaN`, the run corrupts silently and never recovers. BF16 keeps the 8-bit exponent (same ceiling as FP32) but trims the mantissa to 7 bits. Stochastic gradient descent averages over millions of updates — it doesn't need 7 decimal digits of precision per step.
+Read the exponent segments top to bottom. FP32 and BF16 both carry an **8-bit exponent** — the blue bar is the same width — so both top out around $3.4\times10^{38}$. FP16 spends one of those exponent bits on extra mantissa, and that single bit is the whole drama: a 5-bit exponent caps FP16 at **65,504**. LLM gradient norms blow past that ceiling after a few thousand steps, the value saturates to `NaN`, and the run corrupts silently and never recovers.
+
+
+BF16 makes the opposite trade — it keeps FP32's range and pays with a 7-bit mantissa. That sounds reckless until you remember what training actually does: stochastic gradient descent averages over millions of updates, so it never needed seven decimal digits per step. **BF16 fixes overflow because it keeps the 8-bit exponent**, and it gets away with the coarser mantissa because SGD absorbs the noise.
 
 
 | Format | Bits | Exp | Man | Max value  | Primary use                              |
@@ -102,17 +133,17 @@ The three formats differ entirely in how they split their bit budget.
 | INT4   | 4    | —   | —   | 7          | W4A16 deployment                         |
 
 
-> **2026 default.** `torch.autocast`, HuggingFace Accelerate, and vLLM all target BF16. FP16 training is legacy. If you see a codebase still using `fp16=True`, flag it.
+> **2026 default.** `torch.autocast`, HuggingFace Accelerate, and vLLM all target BF16. FP16 training is legacy — if you see a codebase still passing `fp16=True`, flag it.
 {: .prompt-info }
 
 
-### FP8 — Why Not Just Use INT8?
+Keep that 8-bit exponent in your back pocket. The reason floating point beats integers at low bit-widths is the same reason BF16 beat FP16 — and it shows up next when we drop to 8 bits.
 
 
-INT8 is already a mature format — 1 byte per value, hardware support everywhere. Why does FP8 exist?
+### Why does FP8 exist when INT8 already does?
 
 
-The answer is **dynamic range**. INT8 maps 256 evenly-spaced integers between −127 and 127. That uniform grid is fine for weights whose values happen to cluster near zero, but it fails for any tensor with a wide spread of magnitudes. Neural network activations and gradients routinely span many orders of magnitude within a single layer — values like 0.0003 and 180.0 in the same tensor.
+*INT8 is one byte, hardware-supported everywhere — so what is FP8 buying that INT8 can't sell?*
 
 
 <svg viewBox="0 0 620 210" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:640px;display:block;margin:16px auto;font-family:system-ui,sans-serif;">
@@ -201,16 +232,16 @@ The answer is **dynamic range**. INT8 maps 256 evenly-spaced integers between �
 </svg>
 
 
-The spacing between representable values in floating-point is *not* uniform. Near zero the values are packed tightly (high precision for small activations). Near the extremes they spread out (acceptable coarseness where precision matters less). This logarithmic density is exactly what neural network tensors need — most values are small, occasional spikes reach larger magnitudes.
+Look at the two tracks side by side. INT8's ticks are evenly spaced — a fixed step from one end to the other. FP8's ticks bunch up near zero and fan out toward the edges. That uneven spacing is the entire point: neural network activations and gradients routinely span 0.0003 and 180.0 *inside the same tensor*, and floating point packs its precision exactly where most of the values are — near zero — while still reaching out to ±448.
 
 
-INT8 forces you to choose: either your scale factor covers the spikes (leaving precision gaps near zero) or it covers the dense region (and the spikes overflow). FP8 sidesteps that tradeoff structurally.
+Now we can see the trap INT8 sets. With a uniform grid you must pick one scale, and it forces a losing choice: stretch the scale to cover the spikes and the dense region near zero turns into a coarse staircase; tighten it to the dense region and the spikes overflow. FP8 dodges the choice structurally because its grid is already dense where it needs to be. Same 8 bits — but the cyan-vs-amber spacing in the figure is why FP8 exists.
 
 
-### FP8 — Two Variants for Two Roles
+### Why two flavors of FP8 instead of one?
 
 
-FP8 halves BF16's footprint. But 8 bits barely cover both range and precision, so two variants exist with different exponent/mantissa splits:
+*8 bits can't be both wide and precise at once — so which job gets which split?*
 
 
 <div style="display:flex; gap:14px; margin:20px 0; flex-wrap:wrap; font-family:system-ui,sans-serif; font-size:13px;">
@@ -251,13 +282,13 @@ FP8 halves BF16's footprint. But 8 bits barely cover both range and precision, s
 </div>
 
 
-The logic is asymmetric by design: **gradients spike unpredictably and need range**, while **weights and activations stay in a moderate band and need precision**. The standard H100 FP8 training recipe pairs e4m3 forward with e5m2 backward.
+The two cards run the same exponent-vs-mantissa trade we saw at 16 bits, now squeezed into 8. **e4m3** keeps a 3-bit mantissa for finer steps and tops out at 448 — exactly what weights and activations want, since they sit in a moderate band and care about precision. **e5m2** spends that mantissa bit on a fifth exponent bit, reaching 57,344 — exactly what gradients want, since they spike unpredictably and care about range. The standard H100 FP8 recipe pairs **e4m3 forward, e5m2 backward** for that reason. The split is the same lesson as BF16, just applied per-direction.
 
 
-### FP4 and Microscaling — The Blackwell Bet
+### How does FP4 stay usable with only 16 values?
 
 
-4 bits per element means only 16 representable values. Naive FP4 is too coarse for weights. The solution is **microscaling**: share one exponent across a *block* of 16–32 values instead of one per element.
+*Four bits is sixteen numbers total — surely that's too coarse for a weight matrix?*
 
 
 <div style="background:#fffffc; border:1px solid #d1d5db; border-radius:8px; padding:16px; margin:16px 0; font-family:system-ui,sans-serif; font-size:13px;">
@@ -309,6 +340,9 @@ The logic is asymmetric by design: **gradients spike unpredictably and need rang
 </div>
 
 
+Naive FP4 really is too coarse — 16 levels can't span a weight matrix on their own. The fix in the lower row is to stop storing an exponent per element and instead share **one FP8 exponent across a block of 32 values**. Each element keeps only its 4-bit mantissa; the block-level exponent slides the whole group up or down the number line. Amortized, that scale costs $8/32 = 0.25$ bits per value instead of a full per-element exponent. The 4 bits now spend themselves entirely on precision *within* a range the shared exponent already positioned.
+
+
 | Format | Bits | Scaling                              | Hardware                | Status (2026)     |
 | ------ | ---- | ------------------------------------ | ----------------------- | ----------------- |
 | NVFP4  | 4    | Per-tensor / per-block (proprietary) | Blackwell B100/B200     | Production        |
@@ -316,20 +350,33 @@ The logic is asymmetric by design: **gradients spike unpredictably and need rang
 | MXFP8  | 8    | Block shared exponent                | H100+, Blackwell        | Available         |
 
 
-> **Interview signal.** FP4 on Blackwell is the successor to FP8 on Hopper. The enabling design is microscaling — not just a quantization trick. Without block-level exponent sharing, 4-bit floating point is too coarse to be practically useful.
+> **Interview signal.** FP4 on Blackwell is the successor to FP8 on Hopper, and microscaling — not a clever rounding trick — is what enables it. Without a block-level shared exponent, 4-bit floating point is too coarse to use.
 {: .prompt-tip }
+
+
+We now know exactly how many bits a weight costs. But bits on paper aren't bytes in VRAM at serving time — so let's count what actually has to fit on the GPU.
 
 
 ---
 
 
-## 2. The Memory Arithmetic
+## 2. Where does the VRAM actually go?
 
 
-Once you know the format, computing memory is mechanical. Two quantities dominate: **weight memory** (fixed at load time) and **KV cache** (grows with every token and every request in the batch).
+*A 7B model is "7 GB in INT8" — so why does it OOM at batch 8?*
 
 
-### Model Weight Memory
+Two quantities fight for VRAM. **Weight memory** is fixed the moment the model loads; **KV cache** grows with every token of every request in the batch. The "7 GB" number only describes the first one — and that's the trap.
+
+
+### How big are the weights?
+
+
+*This part is mechanical — bytes per param times param count. So why bother with a figure?*
+
+
+<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#1e3a8a;margin-bottom:8px;">Formula · Weight memory</div>
 
 
 $$
@@ -337,7 +384,10 @@ $$
 $$
 
 
-$b_\text{dtype}$ in bytes: FP32 = 4 · BF16/FP16 = 2 · INT8/FP8 = 1 · W4 ≈ 0.5
+  <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
+    $b_\text{dtype}$ in bytes — FP32 = 4 · BF16/FP16 = 2 · INT8/FP8 = 1 · W4 ≈ 0.5
+  </div>
+</div>
 
 
 | Format          | Bytes/param | Qwen2-7B (7B) | Qwen2-70B (70B) |
@@ -348,17 +398,24 @@ $b_\text{dtype}$ in bytes: FP32 = 4 · BF16/FP16 = 2 · INT8/FP8 = 1 · W4 ≈ 0
 | **W4 + scales** | **≈0.53**   | **~3.7 GB**   | **~37 GB**      |
 
 
-Group quantization (group_size = 128) adds FP32 scale tensors: $\tfrac{N}{128} \times 4$ bytes. For a 7B model that's ~218 MB — negligible.
+The table is the easy half of the budget — each row just halves the one above it. The W4 row carries a small asterisk: group quantization (group_size = 128) stores an FP32 scale per group, $\tfrac{N}{128}\times 4$ bytes, about **218 MB** for a 7B model. Negligible against the weights, which is why we round W4 to ~0.5 bytes/param and move on.
 
 
-> **VRAM trap.** AWQ and GPTQ require the full FP16 model resident in VRAM *before* quantization begins. A 7B model needs 14 GB plus Hessian buffers: ~16–18 GB just to quantize. HQQ skips the calibration pass entirely and can offload to CPU — the only practical option for 70B on a single node.
+> **VRAM trap.** AWQ and GPTQ need the full FP16 model resident *before* quantization starts — 14 GB plus Hessian buffers means ~16–18 GB just to quantize a 7B. HQQ skips the calibration pass and can offload to CPU, which is the only practical route for 70B on a single node.
 {: .prompt-warning }
 
 
-### KV Cache — The Hidden Memory Drain
+So weights are bounded and predictable. The reason the 7 GB model still OOMs is the *other* term — the one that scales with traffic.
 
 
-Weight memory is fixed once the model loads. KV cache memory is dynamic and dominates at any real serving workload:
+### Why does the KV cache dwarf the weights?
+
+
+*Weights are fixed at load — so what grows until it eats the GPU?*
+
+
+<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#1e3a8a;margin-bottom:8px;">Formula · KV cache</div>
 
 
 $$
@@ -366,14 +423,10 @@ $$
 $$
 
 
-- $B$ = batch size
-- $S$ = sequence length (context + generated tokens)
-- $L$ = number of transformer layers
-- $H = n_\text{kv-heads} \times d_\text{head}$
-- **Factor of 2**: one K tensor + one V tensor per layer
-
-
-For example with the model config: $L=32$, $n_\text{kv}=32$, $d_\text{head}=128$ → $H = 4{,}096$
+  <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
+    $B$ = batch size · $S$ = sequence length (context + generated) · $L$ = layers · $H = n_\text{kv-heads}\times d_\text{head}$ · the leading <strong>2</strong> = one K tensor + one V tensor per layer. For Qwen2-7B ($L{=}32$, $n_\text{kv}{=}32$, $d_\text{head}{=}128$): $H = 4{,}096$.
+  </div>
+</div>
 
 
 <div style="background:#fffffc; border:1px solid #d1d5db; border-radius:8px; padding:16px; margin:20px 0; font-family:system-ui,sans-serif; font-size:13px; overflow-x:auto;">
@@ -422,26 +475,35 @@ For example with the model config: $L=32$, $n_\text{kv}=32$, $d_\text{head}=128$
 </div>
 
 
-> **Critical rule.** Always compute KV footprint at your target batch and sequence length *before* choosing a compression method. At B=8, S=16K the KV cache is **18× larger than the W4 weights**. Weight quantization does not reduce KV cache at all — for long-context serving you need KV quantization (INT8 or INT4 KV) as a separate step.
+Walk down the rightmost column — that's the KV cache measured in units of the entire W4 weight set. At B=1 it's a rounding error (0.6×). Bump the batch to 8 and it's already **4.5× the weights**; stretch the context to 16K and the yellow row goes red at **18×**. The weights never moved from 3.7 GB; every byte of that growth is the KV cache, because the formula is linear in both $B$ and $S$ and there's nothing sublinear to save you. That's the answer to the opening question — the "7 GB" model OOMs at batch 8 because the cache, not the weights, ran away.
+
+
+> **Critical rule.** Always compute the KV footprint at your *target* batch and sequence length before picking a compression method. Weight quantization does nothing to the KV cache — at B=8, S=16K the cache is 18× the W4 weights, so long-context serving needs KV quantization (INT8/INT4 KV) as a separate, deliberate step.
 {: .prompt-danger }
 
 
-The formula above assumes standard **Multi-Head Attention** where $n_\text{kv-heads} = n_\text{q-heads}$. Modern LLMs often reduce KV heads via GQA, MQA, or replace the KV cache entirely with MLA (DeepSeek) — all of which shrink the cache further.
+One caveat the formula hides: it assumes Multi-Head Attention where $n_\text{kv} = n_\text{q}$. Modern models cut KV heads with GQA/MQA, or drop the cache entirely with MLA (DeepSeek) — each shrinks $H$ and pulls the whole right column down.
+
+
+We can now size the bytes exactly. But two configs with identical VRAM can have wildly different throughput — because the last question isn't *how many* bytes, it's *how fast they move and where they sit*.
 
 
 ---
 
 
-## 3. GPU Memory Hierarchy
+## 3. Which bottleneck are you actually hitting?
 
 
-Knowing how much memory you need is one thing. Understanding where it lives and how fast it moves determines which optimizations actually matter.
+*Why does INT8 buy throughput at batch=1 but do nothing at batch=64?*
 
 
-### The Two-Tier Memory Model
+Every GPU op is a conversation between two memories, and the gap between them is the most important number in serving.
 
 
-Every GPU operation is a conversation between two memories separated by a 20× bandwidth gap. That gap is the single most important number in LLM serving performance.
+### What's the gap between HBM and SRAM?
+
+
+*Two memories, one ~10× faster than the other — which one are we waiting on?*
 
 
 <div style="font-family:system-ui,sans-serif; margin:20px 0; font-size:13px;">
@@ -500,6 +562,9 @@ Every GPU operation is a conversation between two memories separated by a 20× b
 </div>
 
 
+The two cards are sized to scale: HBM holds 40–192 GB but feeds at only ~3 TB/s, while SRAM holds a few dozen MB and feeds at ~20–30 TB/s. Everything heavy — weights, KV cache, activations — lives in the slow, roomy left card; only the tile currently being multiplied fits in the fast, tiny right one. So the question "which bottleneck?" reduces to: *for this workload, is the GPU waiting on the orange card or busy in the green one?*
+
+
 |                 | HBM                              | SRAM                |
 | --------------- | -------------------------------- | ------------------- |
 | Capacity        | 40–192 GB                        | 50–80 MB total      |
@@ -509,7 +574,17 @@ Every GPU operation is a conversation between two memories separated by a 20× b
 | Bottleneck when | bandwidth-bound (small batch)    | —                   |
 
 
-### Arithmetic Intensity — The Bottleneck Diagnostic
+One number decides which card you're stuck on. Let's name it.
+
+
+### What does arithmetic intensity tell us?
+
+
+*Is this workload starved for bytes, or starved for math?*
+
+
+<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#1e3a8a;margin-bottom:8px;">Formula · Arithmetic intensity</div>
 
 
 $$
@@ -517,13 +592,10 @@ $$
 $$
 
 
-At **batch=1 decode**, each weight matrix is streamed from HBM exactly once to compute one output vector. You execute $\approx 2N$ FLOPs and load $\approx 2N$ bytes (BF16). Intensity ≈ **1 FLOPs/byte**.
-
-
-H100's roofline ceiling: 1,979 TFLOPS ÷ 3.35 TB/s ≈ **590 FLOPs/byte**.
-
-
-So batch=1 is running at 1/590th of the compute limit. The GPU is completely bottlenecked on how fast HBM can stream bytes.
+  <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
+    Below the hardware roofline → memory-bound (waiting on bytes). Above it → compute-bound (waiting on tensor cores). H100 roofline = 1,979 TFLOPS ÷ 3.35 TB/s ≈ <strong>590 FLOPs/byte</strong>.
+  </div>
+</div>
 
 
 <div style="background:#fffffc; border:1px solid #d1d5db; border-radius:10px; padding:18px 20px; margin:20px 0; font-family:system-ui,sans-serif; font-size:13px;">
@@ -602,13 +674,90 @@ So batch=1 is running at 1/590th of the compute limit. The GPU is completely bot
 </div>
 
 
-| Regime            | When             | Intensity           | What actually helps           |
-| ----------------- | ---------------- | ------------------- | ----------------------------- |
-| **Memory-bound**  | decode batch ≤ 4 | ~1–4 FLOPs/byte     | W4/W8 (fewer bytes to stream) |
-| **Compute-bound** | batch ≥ 16–32+   | hundreds FLOPs/byte | FP8 (2× TFLOPS on H100)       |
+Read the bars against the dashed roofline. At **batch=1** the bar is a sliver — intensity ≈ 1 FLOP/byte, which is *1/590th* of what the H100's tensor cores could chew through. Each weight matrix gets streamed from HBM exactly once to produce a single output vector, so the GPU spends nearly all its time waiting on the orange card. That's why the batch=1 badge says **W4 wins**: halving the bytes nearly doubles decode throughput, because bytes are the whole bottleneck.
 
 
-**Why INT8 helps at batch=1 but not batch=64.** INT8 halves the bytes streamed from HBM — so you get close to 2× decode throughput at batch=1. At batch=64 you are bottlenecked on arithmetic, not bandwidth. INT8 does not give you more FLOPs. What would help at batch=64 is FP8, which gives 2× tensor core TFLOPS on H100, or larger batch to amortize the HBM traffic you already have.
+Now follow the bars right. Each batch increment reuses the same weights across more rows, so intensity climbs ~linearly: by **batch=64** the bar pushes into the green and the workload flips **compute-bound**. Here INT8 does nothing — it shrinks bytes you're no longer waiting on. What helps now is **FP8**, which doubles the tensor-core TFLOPS (the right card's throughput), or a bigger batch to amortize the HBM traffic you've already paid for. Same model, opposite tool, and the only thing that changed is where the bar sits relative to the roofline.
+
+
+| Regime            | When             | Intensity           | Bottleneck         | What actually helps           |
+| ----------------- | ---------------- | ------------------- | ------------------ | ----------------------------- |
+| **Memory-bound**  | decode batch ≤ 4 | ~1–4 FLOPs/byte     | HBM bytes/sec      | W4/W8 (fewer bytes to stream) |
+| **Compute-bound** | batch ≥ 16–32+   | hundreds FLOPs/byte | Tensor core TFLOPS | FP8 (2× TFLOPS on H100)       |
+
+
+That's the full chain — bits, bytes, and the bottleneck. Before we compose them into a checklist, here's the field guide for when you hit each symptom in the wild.
+
+
+---
+
+
+## 4. Cheatsheet
+
+
+*When you hit one of these in practice, what does it mean — and what's the move?*
+
+
+<div style="margin:16px 0;font-family:system-ui,sans-serif;font-size:13px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
+
+
+  <!-- header -->
+  <div style="display:grid;grid-template-columns:2fr 3fr;background:#f1f5f9;">
+    <div style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">What you see</div>
+    <div style="padding:8px 12px;border-left:1px solid #e2e8f0;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">What it usually means</div>
+  </div>
+
+
+  <!-- row: NaN -->
+  <div style="display:grid;grid-template-columns:2fr 3fr;background:#ffadad;border-top:1px solid #e2e8f0;">
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;color:#7f1d1d;">Loss goes to <code>NaN</code> a few thousand steps into training</div>
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;border-left:1px solid #f59e0b;color:#7f1d1d;">FP16 overflow past 65,504. Switch to BF16 — same range as FP32, mantissa noise SGD absorbs.</div>
+  </div>
+
+
+  <!-- row: OOM -->
+  <div style="display:grid;grid-template-columns:2fr 3fr;border-top:1px solid #e2e8f0;">
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;">Model is "7 GB in INT8" but OOMs at batch 8</div>
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;border-left:1px solid #e2e8f0;">KV cache, not weights. It scales with $B\times S$ — recompute it at your real batch and context first.</div>
+  </div>
+
+
+  <!-- row: no speedup -->
+  <div style="display:grid;grid-template-columns:2fr 3fr;background:#fdffb6;border-top:1px solid #e2e8f0;">
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;color:#713f12;">Quantized to W4, memory dropped, but tokens/s barely moved</div>
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;border-left:1px solid #fde68a;color:#713f12;">You're compute-bound (large batch). W4 only helps the memory-bound regime; reach for FP8 instead.</div>
+  </div>
+
+
+  <!-- row: long context -->
+  <div style="display:grid;grid-template-columns:2fr 3fr;border-top:1px solid #e2e8f0;">
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;">Long-context serving blows the VRAM budget despite W4 weights</div>
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;border-left:1px solid #e2e8f0;">Weight quant never touches the KV cache. Add INT8/INT4 KV quantization as a separate step.</div>
+  </div>
+
+
+  <!-- row: FP8 directions -->
+  <div style="display:grid;grid-template-columns:2fr 3fr;background:#caffbf;border-top:1px solid #e2e8f0;">
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;color:#14532d;">FP8 training run, choosing a format per direction</div>
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;border-left:1px solid #86efac;color:#14532d;">e4m3 forward (precision for weights/activations), e5m2 backward (range for spiking gradients).</div>
+  </div>
+
+
+  <!-- row: naive FP4 -->
+  <div style="display:grid;grid-template-columns:2fr 3fr;border-top:1px solid #e2e8f0;">
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;">Naive FP4 wrecks accuracy</div>
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;border-left:1px solid #e2e8f0;">16 levels is too coarse alone. Use microscaling (MXFP4/NVFP4) — a shared block exponent at 0.25 bits/value.</div>
+  </div>
+
+
+  <!-- row: AWQ/GPTQ OOM -->
+  <div style="display:grid;grid-template-columns:2fr 3fr;border-top:1px solid #e2e8f0;">
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;">AWQ/GPTQ OOMs <em>during</em> quantization on a 70B</div>
+    <div style="padding:7px 12px;min-width:0;overflow-wrap:break-word;border-left:1px solid #e2e8f0;">They need the full FP16 model + Hessian buffers resident. Use HQQ (no calibration pass, CPU-offloadable).</div>
+  </div>
+
+
+</div>
 
 
 ---
@@ -617,7 +766,7 @@ So batch=1 is running at 1/590th of the compute limit. The GPU is completely bot
 ## Putting It All Together
 
 
-These three models compose into a decision checklist for every compression project:
+These three models collapse into one decision checklist for every compression project:
 
 
 <div style="background:#fffffc; border:1px solid #d1d5db; border-radius:8px; padding:16px; margin:20px 0; font-family:system-ui,sans-serif; font-size:13px;">
@@ -655,6 +804,7 @@ These three models compose into a decision checklist for every compression proje
 </div>
 
 
+Pick the dtype, budget the bytes at your real batch and context, then read the roofline to know which lever even matters — that's the whole loop, and every method later in the curriculum is just a sharper tool for one of these three steps.
 
 
 

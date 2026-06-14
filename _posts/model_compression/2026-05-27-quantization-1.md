@@ -5,22 +5,24 @@ date: 2026-05-27 09:00:00 +0000
 categories: [Model Compression, Quantization]
 tags: [quantization, fundamentals]
 math: true
-description: "Scale, zero-point, symmetric vs. asymmetric, per-group calibration, and the roofline model — the quantization fundamentals every LLM practitioner needs before touching a compression tool."
 ---
 
+*We trade a small, controlled error for a large, concrete hardware win — and the art is keeping the error controlled.*
 
-<div style="display:flex;flex-direction:column;gap:14px;margin:24px 0 28px;font-family:system-ui,sans-serif;font-size:13px;max-width:560px;">
-  <div style="flex:1;min-width:220px;background:#eff6ff;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #3b82f6;padding-left:8px;">Questions this post answers</div>
+<!-- Opening block: questions + prerequisites — stacked vertically -->
+<div style="display:flex;flex-direction:column;gap:14px;margin:24px 0 28px;font-family:system-ui,sans-serif;font-size:13px;">
+  <div style="background:#fffffc;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #60a5fa;padding-left:8px;">Questions this post answers</div>
     <ul style="margin:0;padding-left:16px;color:#1e293b;line-height:1.8;">
       <li>What exactly happens when a weight is quantized — where does the error come from?</li>
       <li>How much memory does a model use, and does quantization also speed up inference?</li>
       <li>What parts of a transformer are worth quantizing — and what should never be touched?</li>
       <li>What is calibration granularity, and why does per-group outperform per-tensor for weights?</li>
+      <li>Min/max, percentile, MSE, KL — which range method should we pick?</li>
     </ul>
   </div>
-  <div style="flex:1;min-width:220px;background:#f5f3ff;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #7c3aed;padding-left:8px;">Prerequisites</div>
+  <div style="background:#fffffc;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #c4b5fd;padding-left:8px;">Prerequisites</div>
     <ul style="margin:0;padding-left:16px;color:#1e293b;line-height:1.8;">
       <li>IEEE 754 floating-point basics (sign, exponent, mantissa)</li>
       <li>PyTorch tensor operations</li>
@@ -30,33 +32,20 @@ description: "Scale, zero-point, symmetric vs. asymmetric, per-group calibration
   </div>
 </div>
 
-
-LLM weights are too large for most hardware in FP32 or BF16. Quantization replaces high-precision values with low-bit integers, making 70B models fit on two GPUs instead of eight — but the mechanism, the tradeoffs, and when it actually speeds things up require careful treatment.
-
+A 7B model in FP32 is 28 GB — it doesn't fit on a single consumer GPU. Quantization gets us to 3.5 GB at INT4, but the mechanism, the speedup story, and the calibration knobs are all worth understanding before reaching for a tool. Let's chase each piece in turn.
 
 ---
 
+## 1. What breaks when we don't quantize?
 
-## 1. What Is Quantization?
+*Where does the hardware wall actually appear, and what does the rounding step look like up close?*
 
-
-*Why do we need it — what breaks without it when you try to serve a 7B model on a single consumer GPU?*
-
-
-The bell curve below is your weight distribution. Most values cluster near zero; a handful of outliers reach the tails. INT4 gives you 16 buckets to cover that entire range.
-
-
-<!-- Bell curve + INT4 bucket mapping -->
 <svg viewBox="0 0 640 275" xmlns="http://www.w3.org/2000/svg"
      style="width:100%;max-width:660px;display:block;margin:18px auto;font-family:system-ui,sans-serif;">
   <rect width="640" height="275" fill="#fffffc" rx="10"/>
 
+  <text x="30" y="30" font-size="16" font-weight="800" fill="#4c1d95">FP32</text>
 
-  <!-- FP32 label -->
-  <text x="30" y="30" font-size="16" font-weight="800" fill="#7c3aed">FP32</text>
-
-
-  <!-- Bell curve path (symmetric Gaussian, peak at x=320, y=43) -->
   <path d="M 50,205
     C 70,203 90,199 110,193
     C 130,184 150,170 170,152
@@ -68,23 +57,17 @@ The bell curve below is your weight distribution. Most values cluster near zero;
     C 430,110 450,132 470,152
     C 490,170 510,184 530,193
     C 550,199 570,203 590,205"
-    fill="#e2e8f0" fill-opacity="0.5" stroke="#1e293b" stroke-width="2.5"/>
+    fill="#bdb2ff" fill-opacity="0.35" stroke="#1e293b" stroke-width="2.5"/>
 
+  <circle cx="130" cy="184" r="7" fill="#4c1d95"/>
+  <circle cx="210" cy="110" r="7" fill="#4c1d95"/>
+  <circle cx="270" cy="61"  r="7" fill="#4c1d95"/>
+  <circle cx="310" cy="44"  r="7" fill="#4c1d95"/>
+  <circle cx="330" cy="44"  r="7" fill="#4c1d95"/>
+  <circle cx="370" cy="61"  r="7" fill="#4c1d95"/>
+  <circle cx="430" cy="110" r="7" fill="#4c1d95"/>
+  <circle cx="510" cy="184" r="7" fill="#4c1d95"/>
 
-  <!-- FP32 dots — 8 values, symmetric about x=320.
-       Boxes 3 and 4 each receive two arrows (peak region is dense). -->
-  <circle cx="130" cy="184" r="7" fill="#7c3aed"/>
-  <circle cx="210" cy="110" r="7" fill="#7c3aed"/>
-  <circle cx="270" cy="61"  r="7" fill="#7c3aed"/>
-  <circle cx="310" cy="44"  r="7" fill="#7c3aed"/>
-  <circle cx="330" cy="44"  r="7" fill="#7c3aed"/>
-  <circle cx="370" cy="61"  r="7" fill="#7c3aed"/>
-  <circle cx="430" cy="110" r="7" fill="#7c3aed"/>
-  <circle cx="510" cy="184" r="7" fill="#7c3aed"/>
-
-
-  <!-- Dashed arrows: every dot connects to its nearest INT4 bucket.
-       Box centers (x = 52 + i*68 + 30): 82, 150, 218, 286, 354, 422, 490, 558 -->
   <line x1="130" y1="191" x2="150" y2="242" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4,3"/>
   <line x1="210" y1="117" x2="218" y2="242" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4,3"/>
   <line x1="270" y1="68"  x2="286" y2="242" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4,3"/>
@@ -94,182 +77,140 @@ The bell curve below is your weight distribution. Most values cluster near zero;
   <line x1="430" y1="117" x2="422" y2="242" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4,3"/>
   <line x1="510" y1="191" x2="490" y2="242" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4,3"/>
 
-
-  <!-- INT4 boxes — 8 buckets (box i: x = 52 + i*68, width=60) -->
-
-
-  <!-- Box 0 — far left tail: no weights → lighter (wasted level) -->
-  <rect x="52"  y="242" width="60" height="26" rx="4" fill="#fce7f3" stroke="#f9a8d4"/>
-
-
-  <!-- Box 1 — left shoulder -->
+  <rect x="52"  y="242" width="60" height="26" rx="4" fill="#ffc6ff" stroke="#f0abfc"/>
   <rect x="120" y="242" width="60" height="26" rx="4" fill="#ffadad" stroke="#fca5a5"/>
-  <circle cx="150" cy="255" r="7" fill="#be123c"/>
-
-
-  <!-- Box 2 — left slope -->
+  <circle cx="150" cy="255" r="7" fill="#7f1d1d"/>
   <rect x="188" y="242" width="60" height="26" rx="4" fill="#ffadad" stroke="#fca5a5"/>
-  <circle cx="218" cy="255" r="7" fill="#be123c"/>
-
-
-  <!-- Box 3 — left near-peak: 2 arrows in = crowded -->
+  <circle cx="218" cy="255" r="7" fill="#7f1d1d"/>
   <rect x="256" y="242" width="60" height="26" rx="4" fill="#ffadad" stroke="#fca5a5"/>
-  <circle cx="286" cy="255" r="7" fill="#be123c"/>
-
-
-  <!-- Box 4 — right near-peak: 2 arrows in = crowded -->
+  <circle cx="286" cy="255" r="7" fill="#7f1d1d"/>
   <rect x="324" y="242" width="60" height="26" rx="4" fill="#ffadad" stroke="#fca5a5"/>
-  <circle cx="354" cy="255" r="7" fill="#be123c"/>
-
-
-  <!-- Box 5 — right slope -->
+  <circle cx="354" cy="255" r="7" fill="#7f1d1d"/>
   <rect x="392" y="242" width="60" height="26" rx="4" fill="#ffadad" stroke="#fca5a5"/>
-  <circle cx="422" cy="255" r="7" fill="#be123c"/>
-
-
-  <!-- Box 6 — right shoulder -->
+  <circle cx="422" cy="255" r="7" fill="#7f1d1d"/>
   <rect x="460" y="242" width="60" height="26" rx="4" fill="#ffadad" stroke="#fca5a5"/>
-  <circle cx="490" cy="255" r="7" fill="#be123c"/>
+  <circle cx="490" cy="255" r="7" fill="#7f1d1d"/>
+  <rect x="528" y="242" width="60" height="26" rx="4" fill="#ffc6ff" stroke="#f0abfc"/>
 
-
-  <!-- Box 7 — far right tail: no weights → lighter (wasted level) -->
-  <rect x="528" y="242" width="60" height="26" rx="4" fill="#fce7f3" stroke="#f9a8d4"/>
-
-
-  <!-- INT4 label -->
-  <text x="598" y="261" font-size="15" font-weight="800" fill="#be123c">INT4</text>
+  <text x="598" y="261" font-size="15" font-weight="800" fill="#7f1d1d">INT4</text>
 </svg>
 
+The bell curve is our weight distribution — most values cluster near zero, a few stretch into the tails. Each lavender dot is a real FP32 weight. We give ourselves only sixteen INT4 buckets to cover the whole thing, and the dashed arrows show the actual operation: round each value to its nearest bucket. Notice the two center buckets each receive two arrows — the peak is dense, so distinct FP32 values collapse into the same integer. The pink end-buckets are valid INT4 levels that no weight maps to: wasted resolution. **The rounding distance is the quantization error**, and where to spend grid resolution is the question that drives everything below.
 
-Each purple dot is a real FP32 weight value. The dashed arrows show the core operation: **round each value to its nearest INT4 bucket**. The center boxes (3 and 4) each receive two arrows — the peak region is dense, so multiple FP32 values round to the same integer. The extreme tail boxes (lighter, no arrows) are valid INT4 levels that no weight maps to — **wasted quantization levels**. The rounding distance is the **quantization error**.
+### So why pay this cost at all?
 
+*What is the concrete hardware wall that a 7B model hits in FP32?*
 
-### Why We Need It
-
-
-*What is the concrete hardware wall that quantization breaks through?*
-
-
-<div style="background:#fffffc;border:1px solid #e2e8f0;border-radius:10px;padding:18px 20px;margin:20px 0;font-family:system-ui,sans-serif;font-size:13px;">
-  <div style="font-weight:700;color:#1e293b;margin-bottom:4px;">Model Size vs. dtype — 7B Model</div>
-  <div style="font-size:11px;color:#94a3b8;margin-bottom:14px;">bytes/param × 7 × 10⁹ · RTX 4090 VRAM = 24 GB</div>
+<div style="background:#fffffc;border:1px solid #d1d5db;border-radius:10px;padding:18px 20px;margin:20px 0;font-family:system-ui,sans-serif;font-size:13px;">
+  <div style="font-weight:700;color:#1e293b;margin-bottom:4px;">Model size vs. dtype — 7B model</div>
+  <div style="font-size:11px;color:#6b7280;margin-bottom:14px;">bytes/param × 7 × 10⁹ · RTX 4090 VRAM = 24 GB</div>
   <div style="display:flex;flex-direction:column;gap:8px;">
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:110px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">FP32 (4 B)</span>
+      <span style="width:140px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">FP32 (4 B)</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:100%;height:100%;background:#ffadad;border-radius:4px;"></div>
       </div>
-      <span style="width:52px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">28 GB</span>
+      <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">28 GB</span>
       <span style="background:#ffadad;color:#7f1d1d;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid #fca5a5;flex-shrink:0;">no fit</span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:110px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">BF16 (2 B)</span>
+      <span style="width:140px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">BF16 (2 B)</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:50%;height:100%;background:#ffd6a5;border-radius:4px;"></div>
       </div>
-      <span style="width:52px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">14 GB</span>
+      <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">14 GB</span>
       <span style="background:#ffd6a5;color:#78350f;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid #f59e0b;flex-shrink:0;">tight</span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:110px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">INT8 (1 B)</span>
+      <span style="width:140px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">INT8 (1 B)</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:25%;height:100%;background:#9bf6ff;border-radius:4px;"></div>
       </div>
-      <span style="width:52px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">7 GB</span>
+      <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">7 GB</span>
       <span style="background:#9bf6ff;color:#164e63;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid #67e8f9;flex-shrink:0;">fits</span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:110px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">INT4 / NF4 (0.5 B)</span>
+      <span style="width:140px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">INT4 / NF4 (0.5 B)</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:12.5%;height:100%;background:#caffbf;border-radius:4px;"></div>
       </div>
-      <span style="width:52px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">3.5 GB</span>
+      <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">3.5 GB</span>
       <span style="background:#caffbf;color:#14532d;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid #86efac;flex-shrink:0;">comfortable</span>
     </div>
   </div>
 </div>
 
+The chart reads top-down as a sequence of "no fit / tight / fits / comfortable". FP32 overshoots a 24 GB consumer card by 4 GB before we have loaded a single token of context. BF16 lands inside the card but with no room for the KV cache we will need at runtime. INT8 halves that again, and INT4 leaves us 20 GB free for activations, KV cache, and headroom. Scale this up: 70B in BF16 needs 140 GB and eight A100s; in INT4 it is 35 GB and fits on two.
 
-Three hard reasons to quantize: (1) **VRAM wall** — a 70B BF16 model needs 140 GB; INT4 needs 35 GB, fitting on two A100s instead of eight. (2) **Memory bandwidth is the bottleneck** during decode — at batch=1 the GPU spends most of its time waiting for weights to load from HBM, not doing arithmetic; fewer bytes per weight = higher tokens/s.
+But VRAM is only half the story. At decode time with batch 1, the GPU spends most of its cycles waiting for weights to stream in from HBM, not doing arithmetic — fewer bytes per weight is fewer microseconds per matrix-vector product. Keep that "memory-bound at small batch" fact in your back pocket; we will use it twice in section 2.
 
-
-> **Central tradeoff.** You trade a small, controlled accuracy loss for a large, concrete hardware win. The art of quantization is minimizing that error — which is what the rest of this post covers.
+> **Central tradeoff.** A small, controlled accuracy loss buys a large, concrete hardware win. Everything below is about keeping that error controlled.
 {: .prompt-tip }
 
+That handles whether we *can* fit the model. The harder question is whether we have budgeted for everything *else* that lives in VRAM.
 
 ---
 
+## 2. Where does the memory actually go?
 
-## 2. The Memory Wall & Roofline
+*Weights fit at our chosen dtype — but does the rest fit at our batch and sequence length?*
 
-
-### Weight Memory Economics
-
-
-*Why isn't model size alone the right number to budget for — what else eats VRAM at inference?*
-
-
-<div style="background:#fffffc;border:1px solid #e2e8f0;border-radius:10px;padding:18px 20px;margin:20px 0;font-family:system-ui,sans-serif;font-size:13px;">
-  <div style="font-weight:700;color:#1e293b;margin-bottom:4px;">Weight + KV Cache VRAM — 7B / 70B Models</div>
-  <div style="font-size:11px;color:#94a3b8;margin-bottom:14px;">bytes/param × N params · FP32=4B · BF16=2B · INT8=1B · INT4=0.5B · KV cache: B=32, seq=2048, FP16</div>
+<div style="background:#fffffc;border:1px solid #d1d5db;border-radius:10px;padding:18px 20px;margin:20px 0;font-family:system-ui,sans-serif;font-size:13px;">
+  <div style="font-weight:700;color:#1e293b;margin-bottom:4px;">Weight + KV cache VRAM — 7B / 70B</div>
+  <div style="font-size:11px;color:#6b7280;margin-bottom:14px;">FP32=4B · BF16=2B · INT8=1B · INT4=0.5B · KV: B=16, seq=2048, FP16</div>
   <div style="display:flex;flex-direction:column;gap:8px;">
 
-
-    <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-top:4px;">7B model</div>
-
+    <div style="font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-top:4px;">7B model</div>
 
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:100px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">FP32</span>
+      <span style="width:100px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">FP32</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:100%;height:100%;background:#ffadad;border-radius:4px;"></div>
       </div>
       <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">28 GB</span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:100px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">BF16</span>
+      <span style="width:100px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">BF16</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:50%;height:100%;background:#ffd6a5;border-radius:4px;"></div>
       </div>
       <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">14 GB</span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:100px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">INT8</span>
+      <span style="width:100px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">INT8</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:25%;height:100%;background:#9bf6ff;border-radius:4px;"></div>
       </div>
       <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">7 GB</span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:100px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">INT4 / NF4</span>
+      <span style="width:100px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">INT4 / NF4</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:12.5%;height:100%;background:#caffbf;border-radius:4px;"></div>
       </div>
       <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">3.5 GB</span>
     </div>
 
-
-    <div style="font-size:10px;color:#94a3b8;margin-top:4px;margin-bottom:-2px;font-style:italic;padding-left:2px;">KV cache — B=16, seq=2048, FP16 · L=32, 32 KV heads, d=128</div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:4px;font-style:italic;padding-left:2px;">KV cache — L=32, 32 KV heads, d=128</div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:100px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">KV FP16</span>
+      <span style="width:100px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">KV FP16</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
-        <div style="width:57%;height:100%;background:#ddd6fe;border-radius:4px;"></div>
+        <div style="width:57%;height:100%;background:#bdb2ff;border-radius:4px;"></div>
       </div>
       <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">16 GB</span>
     </div>
 
-
-    <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-top:8px;">70B model</div>
-
+    <div style="font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-top:8px;">70B model</div>
 
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:100px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">BF16</span>
+      <span style="width:100px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">BF16</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:100%;height:100%;background:#ffadad;border-radius:4px;"></div>
       </div>
       <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">140 GB</span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:100px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">INT4 / NF4</span>
+      <span style="width:100px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">INT4 / NF4</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
         <div style="width:25%;height:100%;background:#caffbf;border-radius:4px;"></div>
       </div>
@@ -277,30 +218,25 @@ Three hard reasons to quantize: (1) **VRAM wall** — a 70B BF16 model needs 140
       <span style="background:#caffbf;color:#14532d;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid #86efac;">fits 2×A100</span>
     </div>
 
-
-    <div style="font-size:10px;color:#94a3b8;margin-top:4px;margin-bottom:-2px;font-style:italic;padding-left:2px;">KV cache — B=16, seq=2048, FP16 · L=80, 8 KV heads (GQA), d=128</div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:4px;font-style:italic;padding-left:2px;">KV cache — L=80, 8 KV heads (GQA), d=128</div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="width:100px;text-align:right;font-size:12px;color:#64748b;flex-shrink:0;">KV FP16</span>
+      <span style="width:100px;text-align:right;font-size:12px;color:#374151;flex-shrink:0;">KV FP16</span>
       <div style="flex:1;background:#f1f5f9;border-radius:4px;height:18px;overflow:hidden;">
-        <div style="width:7.1%;height:100%;background:#ddd6fe;border-radius:4px;"></div>
+        <div style="width:7.1%;height:100%;background:#bdb2ff;border-radius:4px;"></div>
       </div>
       <span style="width:60px;font-size:12px;font-weight:600;color:#1e293b;flex-shrink:0;">10 GB</span>
     </div>
   </div>
 </div>
 
+The lavender bar is the surprise. For the 7B model at batch 16 and 2k context, the KV cache is **larger than the INT8 weights and roughly 5× the INT4 weights**. Quantizing weights to INT4 and forgetting the KV cache lands us at 19.5 GB on a 24 GB card, half of which is a tensor that grew with our serving config rather than the model. The 70B row tells the opposite story: GQA collapses 64 heads to 8, the KV cache shrinks to 10 GB, and weights dominate again. The numbers do not generalize; we read them per architecture.
 
-The formula is simple:
-
-
-<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
-  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6366f1;margin-bottom:8px;">Formula · Weight Memory</div>
-
+<div style="background:#fffffc;border:1px solid #e2e8f0;border-left:3px solid #bdb2ff;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#4c1d95;margin-bottom:8px;">Formula · weight memory</div>
 
 $$
 \text{mem}_\text{weights} = N_\text{params} \times b_\text{dtype}
 $$
-
 
   <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
     $N_\text{params}$ — parameter count (e.g. 7 × 10⁹ for a 7B model)<br>
@@ -308,147 +244,81 @@ $$
   </div>
 </div>
 
-
-Weight memory is necessary but not sufficient. At inference you also carry the KV cache, which grows with batch size and sequence length and can dwarf the model weights.
-
-
-<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
-  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6366f1;margin-bottom:8px;">Formula · KV Cache Memory</div>
-
+<div style="background:#fffffc;border:1px solid #e2e8f0;border-left:3px solid #bdb2ff;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#4c1d95;margin-bottom:8px;">Formula · KV cache memory</div>
 
 $$
 \text{mem}_\text{KV} = 2 \times B \times S \times L \times H \times b_\text{dtype}
 $$
 
-
   <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
-    Factor of 2 — one K tensor + one V tensor per layer<br>
-    $B$ — batch size &nbsp;·&nbsp; $S$ — sequence length &nbsp;·&nbsp; $L$ — number of layers<br>
-    $H$ — KV hidden size per layer = $n_\text{kv\_heads} \times d_\text{head}$ &nbsp;·&nbsp; $b_\text{dtype}$ — bytes per element<br>
+    Factor 2 — one K tensor + one V tensor per layer · $B$ batch · $S$ sequence length · $L$ layers · $H = n_\text{kv\_heads} \times d_\text{head}$ · $b_\text{dtype}$ bytes per element
   </div>
 </div>
 
+The KV formula is linear in $B$ and $S$ — every token in every batch slot pays for itself, every layer. That linearity is why a 32-batch, 4k-context server explodes the KV cache to dozens of gigabytes even on a modest model, and why "INT8 KV cache" became a production knob in its own right.
 
-> **First check.** Before optimizing throughput, ask: does the model fit in VRAM at all, including the KV cache at your target batch and sequence length?
+> **First check.** Before optimizing throughput, confirm the model fits in VRAM at the *target batch and sequence length*, KV cache included. Weight bytes alone is not the budget.
 {: .prompt-info }
 
+So we now know what eats the memory. The next question is what we should — and absolutely should not — quantize inside that budget.
 
 ---
 
+## 3. What inside a transformer is worth quantizing?
 
-### Practice Question
+*Weights, activations, KV cache — three targets, three different stories. Why can't one strategy cover all of them?*
 
-
-**Q — Quantization reduces memory footprint. Does it also guarantee faster compute? Why or why not?**
-
-
-<details>
-<summary>💡 Hints</summary>
-
-
-<div style="background:#fdffb6;border:1px solid #fcd34d;border-radius:8px;padding:14px 16px;margin-top:8px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
-<strong>Hint 1:</strong> At inference, is the GPU waiting for data to arrive from HBM to SRAM, or waiting for arithmetic to finish? Which operation dominates at batch=1 for a 7B model?<br><br>
-<strong>Hint 2:</strong> In W4A16, the weights are stored as INT4 — but trace what dtype both operands are when the GEMM actually accumulates. Does a dequantization step happen, and where?
-</div>
-</details>
-
-
-<details>
-<summary>✅ Answer</summary>
-
-
-<div style="background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-top:8px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
-
-
-<strong>Short answer: quantization speeds up memory transport, not arithmetic.</strong>
-
-
-<p style="margin-top:8px;">Reducing bits (e.g. BF16 → INT4) cuts the bytes the GPU must transfer from HBM to SRAM per weight. Since LLM decode at small batch is memory-bandwidth-bound (arithmetic intensity ~1 FLOP/byte vs. the A100 ridge at ~300), loading fewer bytes directly translates to more matrix-vector products per second. W4 loads 0.5 bytes/param vs. 2 bytes/param in BF16 — theoretically 4× the bandwidth use, producing ~2–3× real speedup (overhead closes the gap).</p>
-
-
-<p>However, in W4A16, the INT4 weights are <strong>dequantized to BF16 before the GEMM</strong>. The matmul executes in BF16 on BF16 tensor cores — not on INT4 tensor cores. INT4 is a storage-only format. The speedup is entirely from reduced HBM traffic, not faster arithmetic.</p>
-
-
-<p>To get genuine compute speedup you need W8A8 or FP8: both operands are integers/FP8 at GEMM time, enabling INT8/FP8 tensor cores (2–4× higher FLOP throughput than BF16). That only pays off when the workload is compute-bound (batch ≥ ~32 on A100).</p>
-
-
-</div>
-</details>
-
-
----
-
-
-## 3. Three Quantization Targets
-
-
-*Why can't you just quantize everything uniformly — what makes weights, activations, and KV cache each require a different strategy?*
-
-
-### Why Linear Layers Are the Focus
-
-
-A transformer forward pass is dominated by matrix multiplications. Every attention projection (Q, K, V, O) and every FFN projection (gate, up, down) is a linear layer of the form:
-
+A transformer forward pass is overwhelmingly matrix multiplications. Every attention projection (Q, K, V, O) and every FFN projection (gate, up, down) is a linear of the form
 
 $$
-Y = WX
+Y = W X
 $$
 
+with $W \in \mathbb{R}^{d_\text{out} \times d_\text{in}}$ the weight matrix and $X \in \mathbb{R}^{d_\text{in} \times B}$ the activation batch. Those GEMMs account for over 95% of FLOPs and essentially all the parameter memory in a 7B+ model. LayerNorm, SiLU, softmax, and residual additions are elementwise — negligible memory and arithmetic compared to the matmuls. There is nothing to gain from quantizing them.
 
-where $W \in \mathbb{R}^{d_\text{out} \times d_\text{in}}$ is the weight matrix and $X \in \mathbb{R}^{d_\text{in} \times B}$ is the activation batch. These GEMMs account for over 95% of FLOPs and virtually all the parameter memory in a 7B+ model. LayerNorm, SiLU, softmax, and residual additions are elementwise operations with negligible memory footprint — there is nothing to gain from quantizing them.
-
-
-Quantization replaces one or both FP operands with an integer (or lower-precision FP) representation plus a floating-point scale:
-
+Quantization replaces one or both FP operands with a low-precision representation plus a floating-point scale, so the GEMM becomes
 
 $$
-Y \approx \hat{W}\hat{X}
+Y \approx \hat{W}\hat{X}.
 $$
 
-
-Every quantization scheme discussed below is a choice about which of $W$ and $X$ to quantize, to what bit-width, and with what granularity.
-
-
----
-
-
-### Weights, Activations, and KV Cache
-
+Every scheme below — W4A16, W8A8, FP8, INT8 KV — is a choice about which of $W$ and $X$ to quantize, to what bit-width, and at what granularity.
 
 <div style="display:flex;gap:14px;margin:20px 0;flex-wrap:wrap;font-family:system-ui,sans-serif;font-size:13px;">
-  <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #94a3b8;padding-left:8px;">Weights</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px;color:#334155;">
-      <li>✓ Static — computed once, offline</li>
-      <li>✓ No input dependency</li>
-      <li>✓ No calibration data needed (per-channel)</li>
-      <li style="font-weight:600;color:#4c1d95;">Format: W4 (INT4/NF4)</li>
+  <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Weights</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;">
+      <li>Static — computed once, offline</li>
+      <li>No input dependency</li>
+      <li>No calibration needed for per-channel</li>
+      <li><strong>Format:</strong> W4 (INT4 / NF4)</li>
       <li style="color:#64748b;font-size:12px;">Tools: torchao, autoawq, gptqmodel, HQQ</li>
     </ul>
   </div>
   <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #3b82f6;padding-left:8px;">Activations</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px;color:#334155;">
-      <li>⚡ Dynamic — depend on input tokens</li>
-      <li>⚡ Requires static or dynamic calibration</li>
-      <li>⚡ Enables INT8/FP8 GEMMs at large batch</li>
-      <li style="font-weight:600;color:#1e3a8a;">Format: INT8 (W8A8), INT8 (W4A8)</li>
+    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Activations</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;">
+      <li>Dynamic — depend on input tokens</li>
+      <li>Need static or dynamic calibration</li>
+      <li>Enable INT8/FP8 GEMMs at large batch</li>
+      <li><strong>Format:</strong> INT8 (W8A8), W4A8</li>
       <li style="color:#64748b;font-size:12px;">Tools: torchao, bitsandbytes, llm-compressor</li>
     </ul>
   </div>
-  <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #caffbf;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#14532d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #16a34a;padding-left:8px;">KV Cache</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px;color:#334155;">
-      <li>📈 Grows with sequence length</li>
-      <li>📈 Written + read every generation step</li>
-      <li>📈 Can dwarf weight memory at long seq</li>
-      <li style="font-weight:600;color:#14532d;">Format: INT8, FP8 (H100), INT4</li>
+  <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #86efac;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#14532d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">KV cache</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;">
+      <li>Grows with sequence length</li>
+      <li>Written and read every decode step</li>
+      <li>Can dwarf weights at long seq</li>
+      <li><strong>Format:</strong> INT8, FP8 (H100), INT4</li>
       <li style="color:#64748b;font-size:12px;">Tools: vLLM, TRT-LLM, KIVI</li>
     </ul>
   </div>
 </div>
 
+The three cards split cleanly along one axis: *when do we know the values?* Weights are known offline, so we get unlimited compute budget for the calibration step and can afford fancy schemes. Activations are born at inference, so any calibration overhead is paid per token. KV cache lives between those two — it is written once per token and re-read on every subsequent step, so its compression cost is amortized but its bandwidth bill is enormous.
 
 <div style="overflow-x:auto;margin:16px 0;">
 <table style="border-collapse:collapse;width:100%;font-size:13px;font-family:system-ui,sans-serif;">
@@ -458,18 +328,18 @@ Every quantization scheme discussed below is a choice about which of $W$ and $X$
       <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">When computed</th>
       <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Input-dependent?</th>
       <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Dominant format</th>
-      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Independent decision?</th>
+      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Independent?</th>
     </tr>
   </thead>
   <tbody>
-    <tr>
+    <tr style="background:#bdb2ff40;">
       <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">Weights</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">Once, offline</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">No</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">INT4 / NF4</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">Yes</td>
     </tr>
-    <tr style="background:#9bf6ff20;">
+    <tr style="background:#a0c4ff40;">
       <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">Activations</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">At inference</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">Yes</td>
@@ -478,7 +348,7 @@ Every quantization scheme discussed below is a choice about which of $W$ and $X$
     </tr>
     <tr style="background:#caffbf40;">
       <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">KV cache</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">At generation time</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">At generation</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">Yes (grows with seq)</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">INT8, FP8, INT4</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">Yes</td>
@@ -487,147 +357,110 @@ Every quantization scheme discussed below is a choice about which of $W$ and $X$
 </table>
 </div>
 
-
-> **Orthogonal decisions.** W4A16 quantizes only weights; activations and KV cache stay in BF16. You can add INT8 KV cache to W4A16 without touching the weight scheme. Production deployments routinely stack all three independently.
+> **Orthogonal decisions.** W4A16 quantizes only weights; activations and KV cache stay in BF16. We can stack INT8 KV cache on top without touching the weight scheme. Production deployments routinely combine all three independently.
 {: .prompt-tip }
 
-
-> **Embeddings and LM head.** These are weight tensors but are almost always kept at BF16. They carry quantization error into every layer (embedding) or onto every output token (LM head). They represent under 1% of parameters in 7B+ models — never worth the risk.
+> **Embeddings and the LM head are off-limits.** They are weight tensors, but quantization error here propagates into every layer (embedding) or every output token (LM head). Combined they are under 1% of params in 7B+ models — never worth the risk.
 {: .prompt-warning }
 
+There is one more subtlety hiding in the W4A16 row. We compress the weights to INT4 — but does that mean the GEMM runs in INT4? Hold that question; it sets up the math in the next section.
 
 ---
 
+## 4. How does the math actually work?
 
-## 4. Quantization Math
+*Scale and zero-point — why two parameters, and when does one suffice?*
 
+### Asymmetric: the general case
 
-### Asymmetric Quantization
+*What does a single scale miss when the distribution isn't centered on zero?*
 
-
-*Why do we need two parameters (scale and zero-point) instead of just one — what breaks with a single scale on a non-symmetric distribution?*
-
-
-<!-- ── Asymmetric number-line diagram ─────────────────────────────────── -->
 <svg viewBox="0 0 520 195" xmlns="http://www.w3.org/2000/svg"
      style="width:100%;max-width:560px;display:block;margin:18px auto 4px;font-family:system-ui,sans-serif;background:#fffffc;border-radius:10px;">
 
-
   <text x="26" y="95"  font-size="15" font-weight="700" fill="#1e293b" font-style="italic">r</text>
-  <text x="26" y="150" font-size="15" font-weight="700" fill="#9f1239" font-style="italic">q</text>
-
+  <text x="26" y="150" font-size="15" font-weight="700" fill="#7f1d1d" font-style="italic">q</text>
 
   <line x1="42" y1="90" x2="482" y2="90" stroke="#1e293b" stroke-width="1.8"/>
   <polygon points="480,86 490,90 480,94" fill="#1e293b"/>
 
-
   <rect x="60" y="44" width="400" height="26" fill="#a0c4ff" fill-opacity="0.6" rx="3"/>
   <text x="260" y="61" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">Floating-point range</text>
-
 
   <line x1="60"  y1="85" x2="60"  y2="95" stroke="#1e293b" stroke-width="1.4"/>
   <line x1="460" y1="85" x2="460" y2="95" stroke="#1e293b" stroke-width="1.4"/>
 
-
   <text x="60"  y="32" text-anchor="middle" font-size="12" fill="#1e3a8a" font-style="italic">r</text>
   <text x="68"  y="36" font-size="9"        fill="#1e3a8a">min</text>
-
 
   <line x1="220" y1="85" x2="220" y2="95" stroke="#1e293b" stroke-width="1.4"/>
   <text x="220" y="32" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">0</text>
 
-
   <text x="448" y="32" text-anchor="middle" font-size="12" fill="#1e3a8a" font-style="italic">r</text>
   <text x="456" y="36" font-size="9"        fill="#1e3a8a">max</text>
 
-
-  <line x1="60"  y1="70" x2="60"  y2="141" stroke="#9f1239" stroke-width="1.2" stroke-dasharray="4,3" opacity="0.55"/>
-  <line x1="460" y1="70" x2="460" y2="141" stroke="#9f1239" stroke-width="1.2" stroke-dasharray="4,3" opacity="0.55"/>
-
+  <line x1="60"  y1="70" x2="60"  y2="141" stroke="#7f1d1d" stroke-width="1.2" stroke-dasharray="4,3" opacity="0.55"/>
+  <line x1="460" y1="70" x2="460" y2="141" stroke="#7f1d1d" stroke-width="1.2" stroke-dasharray="4,3" opacity="0.55"/>
 
   <line x1="220" y1="141" x2="220" y2="100" stroke="#1e3a8a" stroke-width="2.4"/>
   <polygon points="214,100 220,91 226,100" fill="#1e3a8a"/>
 
-
-  <text x="232" y="113" font-size="13" font-weight="700" fill="#1e3a8a">&#xD7;<tspan font-style="italic">S</tspan></text>
+  <text x="232" y="113" font-size="13" font-weight="700" fill="#1e3a8a">×<tspan font-style="italic">S</tspan></text>
   <text x="232" y="126" font-size="10"  fill="#1e3a8a">Floating-point</text>
   <text x="232" y="139" font-size="10"  fill="#1e3a8a">Scale</text>
-
 
   <line x1="42" y1="145" x2="482" y2="145" stroke="#1e293b" stroke-width="1.8"/>
   <polygon points="480,141 490,145 480,149" fill="#1e293b"/>
 
+  <circle cx="60"  cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="87"  cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="113" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="140" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="167" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="193" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="220" cy="145" r="7" fill="#7f1d1d"/>
+  <circle cx="247" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="273" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="300" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="327" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="353" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="380" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="407" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="433" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="460" cy="145" r="5" fill="#7f1d1d"/>
 
-  <circle cx="60"  cy="145" r="5" fill="#9f1239"/>
-  <circle cx="87"  cy="145" r="5" fill="#9f1239"/>
-  <circle cx="113" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="140" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="167" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="193" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="220" cy="145" r="7" fill="#9f1239"/>
-  <circle cx="247" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="273" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="300" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="327" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="353" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="380" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="407" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="433" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="460" cy="145" r="5" fill="#9f1239"/>
-
-
-  <text x="55"  y="164" font-size="12" fill="#9f1239" font-style="italic">q</text>
-  <text x="63"  y="168" font-size="9"  fill="#9f1239">min</text>
-  <text x="220" y="164" text-anchor="middle" font-size="14" font-weight="700" fill="#9f1239" font-style="italic">Z</text>
+  <text x="55"  y="164" font-size="12" fill="#7f1d1d" font-style="italic">q</text>
+  <text x="63"  y="168" font-size="9"  fill="#7f1d1d">min</text>
+  <text x="220" y="164" text-anchor="middle" font-size="14" font-weight="700" fill="#7f1d1d" font-style="italic">Z</text>
   <text x="220" y="180" text-anchor="middle" font-size="10" fill="#64748b">Zero point</text>
-  <text x="451" y="164" font-size="12" fill="#9f1239" font-style="italic">q</text>
-  <text x="459" y="168" font-size="9"  fill="#9f1239">max</text>
-
+  <text x="451" y="164" font-size="12" fill="#7f1d1d" font-style="italic">q</text>
+  <text x="459" y="168" font-size="9"  fill="#7f1d1d">max</text>
 
 </svg>
 
+The top axis is the floating-point range $[r_\text{min}, r_\text{max}]$, and the bottom is the integer grid. Asymmetric quantization places those two side-by-side and uses two parameters to map between them: a **scale** $s$ that sets the grid spacing and a **zero-point** $z$ that decides which integer corresponds to FP zero. Notice the pivot — FP zero lands on $Z$, not on $q_\text{min}$. That shift is what makes asymmetric work for ReLU outputs in $[0, x_\text{max}]$ or any other distribution that isn't centered: every integer level lands on a real value in range, no levels wasted.
 
-Asymmetric quantization maps a floating-point range $[x_\text{min}, x_\text{max}]$ to an integer grid using two parameters: **scale** $s$ (FP16, sets grid spacing) and **zero-point** $z$ (INT8 or FP16, shifts the grid so that FP zero maps to a specific integer). Using two parameters allows full coverage of any asymmetric range with no wasted levels — essential for ReLU activations and biases.
-
-
-A single scale centered at zero wastes half the integer range when all values are positive (e.g., ReLU outputs span $[0, x_\text{max}]$, leaving the entire negative half of the grid empty). The zero-point shifts the grid to align $q_\text{min}$ with $x_\text{min}$, so every integer level maps to a real value in range.
-
-
-<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
-  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6366f1;margin-bottom:8px;">Formula · Asymmetric Quantization</div>
-
+<div style="background:#fffffc;border:1px solid #e2e8f0;border-left:3px solid #bdb2ff;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#4c1d95;margin-bottom:8px;">Formula · asymmetric quantization</div>
 
 $$
 s = \frac{x_\text{max} - x_\text{min}}{2^b - 1}, \qquad z = \text{round}\!\left(\frac{-x_\text{min}}{s}\right)
 $$
 
-
 $$
-x_q = \text{clamp}\!\left(\text{round}\!\left(\frac{x}{s}\right) + z,\ 0,\ 2^b - 1\right)
+x_q = \text{clamp}\!\left(\text{round}\!\left(\frac{x}{s}\right) + z,\ 0,\ 2^b - 1\right), \qquad \hat{x} = s \cdot (x_q - z)
 $$
-
-
-$$
-\hat{x} = s \cdot (x_q - z)
-$$
-
 
   <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
-    $b$ — bit-width (e.g. 4 or 8) &nbsp;·&nbsp; $s$ — scale, stored as <strong>FP16</strong> &nbsp;·&nbsp; $z$ — zero-point, stored as <strong>INT8</strong> (or FP16) &nbsp;·&nbsp; $\hat{x}$ — reconstructed value
+    $b$ — bit-width · $s$ stored as <strong>FP16</strong> · $z$ stored as <strong>INT8</strong> (or FP16) · $\hat{x}$ — reconstructed value
   </div>
 </div>
 
-
-**Worked example — unsigned INT4, range 0–15:**
-
-
-Tensor: $x = [-3.2,\ 0.0,\ 1.7,\ 4.5]$
-
+A small worked example fixes the mechanics. Take $x = [-3.2, 0.0, 1.7, 4.5]$ at INT4 unsigned (range 0–15). The two parameters fall out:
 
 $$
-s = \frac{4.5 - (-3.2)}{15} = 0.5133, \qquad z = \text{round}\!\left(\frac{3.2}{0.5133}\right) = 6
+s = \frac{4.5 - (-3.2)}{15} = 0.5133, \qquad z = \text{round}\!\left(\frac{3.2}{0.5133}\right) = 6.
 $$
-
 
 <div style="overflow-x:auto;margin:12px 0;">
 <table style="border-collapse:collapse;width:100%;font-size:13px;font-family:system-ui,sans-serif;">
@@ -649,260 +482,197 @@ $$
 </table>
 </div>
 
-
-The zero-point ensures FP zero maps exactly to integer 6 and dequantizes back to exactly 0.0 — the defining property of the asymmetric construction.
-
-
-<div style="background:#9bf6ff;border:1px solid #67e8f9;border-left:3px solid #164e63;border-radius:0 6px 6px 0;padding:12px 16px;margin:16px 0;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
-<strong style="color:#164e63;">Max error bound.</strong> Every in-range value satisfies <span style="white-space:nowrap;">|<em>e</em>| ≤ <em>s</em>/2</span>. Here <em>s</em>/2 = 0.257; all errors in the table above are below this bound. Smaller scale = smaller error per element, but narrower representable range — the central tradeoff calibration optimizes.
-</div>
-
+The green row is the defining property: FP zero round-trips exactly because $z$ was constructed to send it there. Every other error is bounded by half a grid step — here $s/2 = 0.257$, and the table confirms every entry stays under it. A smaller $s$ would tighten that bound but cover a narrower range, and that tradeoff is exactly what calibration in section 6 will optimize.
 
 ```python
 import torch
-
 
 def quantize_asymmetric(x: torch.Tensor, bits: int = 8):
     """Per-tensor asymmetric quantization (unsigned integer grid)."""
     q_min, q_max = 0, 2**bits - 1
     x_min, x_max = x.min().item(), x.max().item()
 
+    scale = (x_max - x_min) / (q_max - q_min)
+    zero_point = round(-x_min / scale)
+    zero_point = int(max(q_min, min(q_max, zero_point)))
 
-    scale = (x_max - x_min) / (q_max - q_min)          # FP16 in production
-    zero_point = round(-x_min / scale)                   # INT8 in production
-    zero_point = int(max(q_min, min(q_max, zero_point))) # clamp to int grid
-
-
-    x_q = torch.clamp(torch.round(x / scale + zero_point), q_min, q_max).to(torch.int8)
-    x_dq = scale * (x_q.float() - zero_point)           # dequantize → FP32
-
-
+    x_q  = torch.clamp(torch.round(x / scale + zero_point), q_min, q_max).to(torch.int8)
+    x_dq = scale * (x_q.float() - zero_point)
     return x_q, x_dq, scale, zero_point
 
 
-
-
-# --- smoke test ---
 x = torch.tensor([-3.2, 0.0, 1.7, 4.5])
 x_q, x_dq, s, z = quantize_asymmetric(x, bits=4)
 print(f"scale={s:.4f}  zero_point={z}")
-print(f"quantized : {x_q.tolist()}")          # [0, 6, 9, 15]
-print(f"dequantized: {x_dq.tolist()}")        # [-3.08, 0.0, 1.54, 4.62]
-print(f"max error : {(x - x_dq).abs().max():.4f}")  # ≤ s/2 = 0.257
+print(f"q : {x_q.tolist()}")    # [0, 6, 9, 15]
+print(f"dq: {x_dq.tolist()}")   # [-3.08, 0.0, 1.54, 4.62]
 ```
 
+That covers any range. So why isn't asymmetric the universal default?
 
----
-
-
-### Symmetric Quantization
-
+### Symmetric: when zero-point is wasted
 
 *Why is symmetric the default for weights but a poor choice for activations?*
 
-
-<!-- ── Symmetric number-line diagram ──────────────────────────────────── -->
 <svg viewBox="0 0 520 195" xmlns="http://www.w3.org/2000/svg"
      style="width:100%;max-width:560px;display:block;margin:18px auto 4px;font-family:system-ui,sans-serif;background:#fffffc;border-radius:10px;">
 
-
   <text x="26" y="95"  font-size="15" font-weight="700" fill="#1e293b" font-style="italic">r</text>
-  <text x="26" y="150" font-size="15" font-weight="700" fill="#9f1239" font-style="italic">q</text>
-
+  <text x="26" y="150" font-size="15" font-weight="700" fill="#7f1d1d" font-style="italic">q</text>
 
   <line x1="42" y1="90" x2="482" y2="90" stroke="#1e293b" stroke-width="1.8"/>
   <polygon points="480,86 490,90 480,94" fill="#1e293b"/>
 
-
   <rect x="60" y="44" width="400" height="26" fill="#a0c4ff" fill-opacity="0.6" rx="3"/>
   <text x="260" y="61" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">Floating-point range</text>
-
 
   <line x1="60"  y1="85" x2="60"  y2="95" stroke="#1e293b" stroke-width="1.4"/>
   <line x1="460" y1="85" x2="460" y2="95" stroke="#1e293b" stroke-width="1.4"/>
 
-
-  <text x="60" y="30" text-anchor="middle" font-size="12" fill="#1e3a8a">&#x2212;|r|</text>
+  <text x="60" y="30" text-anchor="middle" font-size="12" fill="#1e3a8a">−|r|</text>
   <text x="72" y="39" font-size="9"        fill="#1e3a8a">max</text>
-
 
   <line x1="260" y1="85" x2="260" y2="95" stroke="#1e293b" stroke-width="1.4"/>
   <text x="260" y="32" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">0</text>
 
-
   <text x="448" y="32" text-anchor="middle" font-size="12" fill="#1e3a8a">|r|</text>
   <text x="456" y="38" font-size="9"        fill="#1e3a8a">max</text>
 
-
-  <line x1="60"  y1="70" x2="60"  y2="141" stroke="#9f1239" stroke-width="1.2" stroke-dasharray="4,3" opacity="0.55"/>
-  <line x1="460" y1="70" x2="460" y2="141" stroke="#9f1239" stroke-width="1.2" stroke-dasharray="4,3" opacity="0.55"/>
-
+  <line x1="60"  y1="70" x2="60"  y2="141" stroke="#7f1d1d" stroke-width="1.2" stroke-dasharray="4,3" opacity="0.55"/>
+  <line x1="460" y1="70" x2="460" y2="141" stroke="#7f1d1d" stroke-width="1.2" stroke-dasharray="4,3" opacity="0.55"/>
 
   <line x1="260" y1="141" x2="260" y2="100" stroke="#1e3a8a" stroke-width="2.4"/>
   <polygon points="254,100 260,91 266,100" fill="#1e3a8a"/>
 
-
-  <text x="272" y="113" font-size="13" font-weight="700" fill="#1e3a8a">&#xD7;<tspan font-style="italic">S</tspan></text>
+  <text x="272" y="113" font-size="13" font-weight="700" fill="#1e3a8a">×<tspan font-style="italic">S</tspan></text>
   <text x="272" y="126" font-size="10"  fill="#1e3a8a">Floating-point</text>
   <text x="272" y="139" font-size="10"  fill="#1e3a8a">Scale</text>
-
 
   <line x1="42" y1="145" x2="482" y2="145" stroke="#1e293b" stroke-width="1.8"/>
   <polygon points="480,141 490,145 480,149" fill="#1e293b"/>
 
+  <circle cx="60"  cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="89"  cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="117" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="146" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="174" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="203" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="231" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="260" cy="145" r="7" fill="#7f1d1d"/>
+  <circle cx="289" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="317" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="346" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="374" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="403" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="431" cy="145" r="5" fill="#7f1d1d"/>
+  <circle cx="460" cy="145" r="5" fill="#7f1d1d"/>
 
-  <circle cx="60"  cy="145" r="5" fill="#9f1239"/>
-  <circle cx="89"  cy="145" r="5" fill="#9f1239"/>
-  <circle cx="117" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="146" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="174" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="203" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="231" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="260" cy="145" r="7" fill="#9f1239"/>
-  <circle cx="289" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="317" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="346" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="374" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="403" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="431" cy="145" r="5" fill="#9f1239"/>
-  <circle cx="460" cy="145" r="5" fill="#9f1239"/>
-
-
-  <text x="55"  y="164" font-size="12" fill="#9f1239" font-style="italic">q</text>
-  <text x="63"  y="168" font-size="9"  fill="#9f1239">min</text>
-  <text x="260" y="164" text-anchor="middle" font-size="14" font-weight="700" fill="#9f1239" font-style="italic">Z</text>
-  <text x="276" y="164" font-size="12" font-weight="600" fill="#9f1239">= 0</text>
-  <text x="451" y="164" font-size="12" fill="#9f1239" font-style="italic">q</text>
-  <text x="459" y="168" font-size="9"  fill="#9f1239">max</text>
-
+  <text x="55"  y="164" font-size="12" fill="#7f1d1d" font-style="italic">q</text>
+  <text x="63"  y="168" font-size="9"  fill="#7f1d1d">min</text>
+  <text x="260" y="164" text-anchor="middle" font-size="14" font-weight="700" fill="#7f1d1d" font-style="italic">Z</text>
+  <text x="276" y="164" font-size="12" font-weight="600" fill="#7f1d1d">= 0</text>
+  <text x="451" y="164" font-size="12" fill="#7f1d1d" font-style="italic">q</text>
+  <text x="459" y="168" font-size="9"  fill="#7f1d1d">max</text>
 
 </svg>
 
+Symmetric pins $z = 0$. The integer grid is centered on zero and the scale is set by the maximum absolute value, $s = \max\lvert x \rvert / (2^{b-1} - 1)$. Two consequences fall out of the picture: the dequantization collapses to one multiply $\hat{x} = s \cdot x_q$ — no subtract — and one negative integer level is permanently unused (INT8 uses −127 to 127, not −128). That's a 0.4% waste on INT8, but the real reason it works for transformer weights is in the histogram: trained weights are approximately zero-centered, so we'd put $z$ near 0 anyway.
 
-Symmetric quantization fixes $z = 0$ — the integer grid is centered at zero. Scale is determined by the maximum absolute value. This eliminates the subtract-then-multiply in dequantization (just $\hat{x} = s \cdot x_q$), simplifying kernels. It wastes some representable levels when the distribution is not zero-centered, but transformer weight matrices are approximately zero-centered after training, making symmetric the default for weight quantization.
-
-
-<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
-  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6366f1;margin-bottom:8px;">Formula · Symmetric Quantization</div>
-
+<div style="background:#fffffc;border:1px solid #e2e8f0;border-left:3px solid #bdb2ff;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#4c1d95;margin-bottom:8px;">Formula · symmetric quantization</div>
 
 $$
 s = \frac{\max|x|}{2^{b-1} - 1}, \qquad z = 0
 $$
 
-
 $$
 x_q = \text{clamp}\!\left(\text{round}\!\left(\frac{x}{s}\right),\ -2^{b-1},\ 2^{b-1}-1\right), \qquad \hat{x} = s \cdot x_q
 $$
 
-
   <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
-    $s$ — stored as <strong>FP16</strong> &nbsp;·&nbsp; INT8 symmetric: range −127 to 127, $s = \max|x|/127$ &nbsp;·&nbsp; INT4 symmetric: range −7 to 7, $s = \max|x|/7$
+    INT8 symmetric: range −127 to 127 · INT4 symmetric: range −7 to 7 · $s$ stored as FP16
   </div>
 </div>
 
-
 <div style="display:flex;gap:14px;margin:20px 0;flex-wrap:wrap;font-family:system-ui,sans-serif;font-size:13px;">
-  <div style="flex:1;min-width:220px;background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #94a3b8;padding-left:8px;">Asymmetric</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
-      <li>Two params: scale (FP16) + zero-point (INT8/FP16)</li>
+  <div style="flex:1;min-width:220px;background:#fffffc;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Asymmetric</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;font-size:12px;">
+      <li>Two params: scale + zero-point</li>
       <li>Covers any range $[x_\text{min}, x_\text{max}]$ exactly</li>
       <li>Best for ReLU activations, biases</li>
       <li>Dequant: $\hat{x} = s(x_q - z)$ — two ops</li>
     </ul>
   </div>
   <div style="flex:1;min-width:220px;background:#fffffc;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;border-left:3px solid #7c3aed;padding-left:8px;">Symmetric — preferred for weights</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
-      <li>One param: scale (FP16) only, $z=0$</li>
-      <li>Wastes 1 negative level (−128 unused for INT8)</li>
+    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-size:11px;">Symmetric — preferred for weights</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;font-size:12px;">
+      <li>One param: scale only, $z=0$</li>
+      <li>Wastes one negative level</li>
       <li>Best for zero-centered weight distributions</li>
       <li>Dequant: $\hat{x} = s \cdot x_q$ — one multiply</li>
     </ul>
   </div>
 </div>
 
-
-> **Relative error explodes on small values.** Relative error ≈ $s / (2\lvert x \rvert)$.
->
-> When one outlier at 5.0 sets the scale for a tensor where 99% of values are in [−0.3, 0.3], those small values get 17× inflated error. Per-tensor symmetric quantization on LLM activations almost always fails for this reason — activations have channel-wise outliers.
+> **Relative error explodes on small values.** Per-tensor symmetric on activations almost always fails for this reason — relative error scales as $s / (2 \lvert x \rvert)$, so a single outlier at 5.0 in a tensor whose 99% bulk lives in $[-0.3, 0.3]$ inflates error on those small values by roughly 17×. Activations carry channel-wise outliers; weights, mostly, do not.
 {: .prompt-danger }
-
 
 ```python
 import torch
 
-
 def quantize_symmetric(x: torch.Tensor, bits: int = 8):
-    """Per-tensor symmetric quantization (signed integer grid, z=0)."""
-    q_max = 2**(bits - 1) - 1   # INT8 → 127, INT4 → 7
-
-
-    scale = x.abs().max().item() / q_max    # FP16 in production
-    zero_point = 0                          # always 0 — no shift needed
-
-
-    x_q = torch.clamp(torch.round(x / scale), -q_max, q_max).to(torch.int8)
-    x_dq = scale * x_q.float()             # dequantize → FP32
-
-
+    """Per-tensor symmetric quantization (signed grid, z=0)."""
+    q_max = 2**(bits - 1) - 1
+    scale = x.abs().max().item() / q_max
+    x_q   = torch.clamp(torch.round(x / scale), -q_max, q_max).to(torch.int8)
+    x_dq  = scale * x_q.float()
     return x_q, x_dq, scale
 
 
-
-
-# --- smoke test ---
 x = torch.tensor([-3.2, 0.0, 1.7, 4.5])
 x_q, x_dq, s = quantize_symmetric(x, bits=4)
-print(f"scale={s:.4f}  zero_point=0")
-print(f"quantized : {x_q.tolist()}")         # [-5, 0, 3, 7]
-print(f"dequantized: {x_dq.tolist()}")       # [-3.21, 0.0, 1.93, 4.5]
-print(f"max error : {(x - x_dq).abs().max():.4f}")
+print(f"scale={s:.4f}, z=0")
+print(f"q : {x_q.tolist()}")    # [-5, 0, 3, 7]
+print(f"dq: {x_dq.tolist()}")   # [-3.21, 0.0, 1.93, 4.5]
 ```
 
+The danger callout flagged the failure mode: one bad value can ruin an entire tensor. That points squarely at the next knob — how *many* scales do we use per tensor?
 
 ---
 
+## 5. Why does the number of scales matter?
 
-## 5. Calibration Granularity
+*Per-tensor, per-channel, per-group — what does an outlier actually do to the rest of the values?*
 
+The scale formula takes a range as input. The question is: a range over *what*? The whole tensor? Each output channel? Each block of 128 contiguous weights? That choice is the **granularity** knob, and it controls how far an outlier's blast radius reaches.
 
-*Why does the number of scale factors matter — what breaks when one outlier controls the scale for thousands of weights?*
+### Three granularities, side by side
 
-
-How many (scale, zero-point) pairs you compute for a tensor is as important as the bit-width. A single pair for the entire tensor (per-tensor) is fast but vulnerable to outliers. One pair per output channel (per-channel) isolates outlier channels. One pair per block of $g$ contiguous values (per-group) provides the finest accuracy with manageable overhead for static weights.
-
-
-### Per-Tensor, Per-Channel, and Per-Group
-
+*What does an outlier look like under each scheme?*
 
 <div style="background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:16px 0;font-family:system-ui,sans-serif;font-size:13px;">
 
-
-  <!-- PER-TENSOR -->
-  <div style="font-size:11px;color:#64748b;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;">PER-TENSOR — one scale for the entire weight matrix</div>
-  <div style="display:flex;gap:3px;flex-wrap:wrap;align-items:flex-start;margin-bottom:16px;">
-    <div style="background:#bdb2ff;color:#4c1d95;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:700;white-space:nowrap;align-self:center;">s, z</div>
+  <div style="font-size:11px;color:#64748b;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;">Per-tensor — one scale for the entire matrix</div>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:16px;">
+    <div style="background:#bdb2ff;color:#4c1d95;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:700;white-space:nowrap;">s, z</div>
     <div style="display:flex;gap:2px;flex-wrap:wrap;align-items:center;">
-      <div style="background:#e2e8f0;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₁</div>
-      <div style="background:#e2e8f0;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₂</div>
+      <div style="background:#f1f5f9;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₁</div>
+      <div style="background:#f1f5f9;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₂</div>
       <div style="background:#ffadad;border:1px solid #fca5a5;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#7f1d1d;font-weight:700;">5.0!</div>
-      <div style="background:#e2e8f0;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₄</div>
-      <div style="background:#e2e8f0;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₅</div>
-      <div style="background:#e2e8f0;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₆</div>
-      <div style="background:#e2e8f0;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₇</div>
-      <div style="background:#e2e8f0;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₈</div>
+      <div style="background:#f1f5f9;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₄</div>
+      <div style="background:#f1f5f9;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₅</div>
+      <div style="background:#f1f5f9;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₆</div>
+      <div style="background:#f1f5f9;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₇</div>
+      <div style="background:#f1f5f9;border:1px solid #cbd5e1;width:28px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;">w₈</div>
     </div>
-    <div style="font-size:11px;color:#7f1d1d;font-weight:600;align-self:center;margin-left:6px;">one outlier inflates s for all 8 → 17× error on small values</div>
+    <div style="font-size:11px;color:#7f1d1d;font-weight:600;margin-left:6px;">one outlier inflates s for all 8 → ~17× error on small values</div>
   </div>
 
-
-  <!-- PER-CHANNEL -->
-  <div style="font-size:11px;color:#64748b;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;">PER-CHANNEL — one scale per output row (channel)</div>
+  <div style="font-size:11px;color:#64748b;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;">Per-channel — one scale per output row</div>
   <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:16px;">
     <div style="display:flex;align-items:center;gap:4px;">
-      <div style="background:#a0c4ff;color:#1e3a8a;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;flex-shrink:0;">s₀, z₀</div>
+      <div style="background:#a0c4ff;color:#1e3a8a;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;">s₀, z₀</div>
       <div style="display:flex;gap:2px;">
         <div style="background:#fffffc;border:1px solid #a0c4ff;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#1e3a8a;">w₀₀</div>
         <div style="background:#fffffc;border:1px solid #a0c4ff;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#1e3a8a;">w₀₁</div>
@@ -912,7 +682,7 @@ How many (scale, zero-point) pairs you compute for a tensor is as important as t
       <div style="font-size:10px;color:#1e3a8a;margin-left:4px;">← normal range</div>
     </div>
     <div style="display:flex;align-items:center;gap:4px;">
-      <div style="background:#ffadad;color:#7f1d1d;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;flex-shrink:0;">s₁, z₁</div>
+      <div style="background:#ffadad;color:#7f1d1d;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;">s₁, z₁</div>
       <div style="display:flex;gap:2px;">
         <div style="background:#ffadad;border:1px solid #fca5a5;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#7f1d1d;font-weight:700;">5.0</div>
         <div style="background:#ffadad;border:1px solid #fca5a5;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#7f1d1d;font-weight:700;">4.8</div>
@@ -922,7 +692,7 @@ How many (scale, zero-point) pairs you compute for a tensor is as important as t
       <div style="font-size:10px;color:#7f1d1d;font-weight:600;margin-left:4px;">← outlier channel gets its own large s₁ — row 0 unaffected</div>
     </div>
     <div style="display:flex;align-items:center;gap:4px;">
-      <div style="background:#a0c4ff;color:#1e3a8a;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;flex-shrink:0;">s₂, z₂</div>
+      <div style="background:#a0c4ff;color:#1e3a8a;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;">s₂, z₂</div>
       <div style="display:flex;gap:2px;">
         <div style="background:#fffffc;border:1px solid #a0c4ff;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#1e3a8a;">w₂₀</div>
         <div style="background:#fffffc;border:1px solid #a0c4ff;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#1e3a8a;">w₂₁</div>
@@ -933,32 +703,28 @@ How many (scale, zero-point) pairs you compute for a tensor is as important as t
     </div>
   </div>
 
-
-  <!-- PER-GROUP -->
-  <div style="font-size:11px;color:#64748b;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;">PER-GROUP (g=4 shown) — one scale per g contiguous weights within a row</div>
-  <div style="display:flex;flex-direction:column;gap:5px;">
-    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-      <div style="background:#caffbf;color:#14532d;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;flex-shrink:0;">s₀₀</div>
-      <div style="display:flex;gap:2px;margin-right:4px;">
-        <div style="background:#fffffc;border:1px solid #caffbf;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₁</div>
-        <div style="background:#fffffc;border:1px solid #caffbf;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₂</div>
-        <div style="background:#fffffc;border:1px solid #caffbf;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₃</div>
-        <div style="background:#fffffc;border:1px solid #caffbf;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₄</div>
-      </div>
-      <div style="background:#ffadad;color:#7f1d1d;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;flex-shrink:0;">s₀₁</div>
-      <div style="display:flex;gap:2px;">
-        <div style="background:#ffadad;border:1px solid #fca5a5;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#7f1d1d;font-weight:700;">5.0</div>
-        <div style="background:#fffffc;border:1px solid #caffbf;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₆</div>
-        <div style="background:#fffffc;border:1px solid #caffbf;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₇</div>
-        <div style="background:#fffffc;border:1px solid #caffbf;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₈</div>
-      </div>
-      <div style="font-size:10px;color:#14532d;font-weight:600;margin-left:4px;">outlier confined to group s₀₁ — group s₀₀ unaffected</div>
+  <div style="font-size:11px;color:#64748b;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;">Per-group (g=4 shown) — one scale per g contiguous weights within a row</div>
+  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+    <div style="background:#caffbf;color:#14532d;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;">s₀₀</div>
+    <div style="display:flex;gap:2px;margin-right:4px;">
+      <div style="background:#fffffc;border:1px solid #86efac;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₁</div>
+      <div style="background:#fffffc;border:1px solid #86efac;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₂</div>
+      <div style="background:#fffffc;border:1px solid #86efac;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₃</div>
+      <div style="background:#fffffc;border:1px solid #86efac;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₄</div>
     </div>
+    <div style="background:#ffadad;color:#7f1d1d;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;white-space:nowrap;">s₀₁</div>
+    <div style="display:flex;gap:2px;">
+      <div style="background:#ffadad;border:1px solid #fca5a5;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#7f1d1d;font-weight:700;">5.0</div>
+      <div style="background:#fffffc;border:1px solid #86efac;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₆</div>
+      <div style="background:#fffffc;border:1px solid #86efac;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₇</div>
+      <div style="background:#fffffc;border:1px solid #86efac;width:26px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#14532d;">w₈</div>
+    </div>
+    <div style="font-size:10px;color:#14532d;font-weight:600;margin-left:4px;">outlier confined to group s₀₁ — group s₀₀ unaffected</div>
   </div>
-
 
 </div>
 
+Read it as a sequence of containment radii. Per-tensor: one outlier in eight values poisons the scale for all eight. Per-channel: the outlier is trapped in its own row, the other rows keep a fine grid. Per-group with $g=4$: only three other values share the contaminated scale. The pattern is general — the smaller the group, the smaller the blast radius — and we are paying for the privilege only in metadata, not in compute.
 
 <div style="overflow-x:auto;margin:16px 0;">
 <table style="border-collapse:collapse;width:100%;font-size:13px;font-family:system-ui,sans-serif;">
@@ -984,589 +750,310 @@ How many (scale, zero-point) pairs you compute for a tensor is as important as t
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">1 per output row</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">Good</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;">Minimal</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Weights in INT8, activations</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Weights at INT8, activations</td>
     </tr>
     <tr style="background:#caffbf;">
       <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;color:#14532d;">Per-group (g=128)</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#14532d;">N/g per row</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#14532d;">Best</td>
       <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#14532d;">+~3% params</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;color:#14532d;">W4 weights (GPTQ, AWQ, HQQ)</td>
+      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;color:#14532d;">W4 weights — GPTQ, AWQ, HQQ</td>
     </tr>
   </tbody>
 </table>
 </div>
 
-
-> **Scale metadata overhead.** Per-group with g=128 on a 4096×4096 weight matrix stores 4096×(4096/128) = 131,072 FP16 scale values = 256 KB per layer. Over 32 layers that is ~8 MB — negligible versus the 3.5 GB W4 model. This is why g=128 is the default for almost all W4 production deployments.
+> **The metadata math is forgiving.** For a 4096×4096 weight matrix at $g=128$, we store $4096 \times (4096/128) = 131{,}072$ FP16 scales — 256 KB per layer. Across 32 layers that's ~8 MB on a 3.5 GB W4 model. Negligible. This is why $g=128$ is the production default.
 {: .prompt-tip }
-
 
 ```python
 import torch
 
-
-def _sym_quant(x: torch.Tensor, bits: int):
-    q_max = 2**(bits - 1) - 1
-    scale = x.abs().max() / q_max
-    x_q   = torch.clamp(torch.round(x / scale), -q_max, q_max).to(torch.int8)
-    return x_q, scale
-
-
-
-
 def quantize_per_tensor(W: torch.Tensor, bits: int = 8):
-    x_q, scale = _sym_quant(W, bits)
-    x_dq = scale * x_q.float()
-    return x_q, x_dq, scale
-
-
+    q_max = 2**(bits - 1) - 1
+    scale = W.abs().max() / q_max
+    x_q   = torch.clamp(torch.round(W / scale), -q_max, q_max).to(torch.int8)
+    return x_q, scale * x_q.float(), scale
 
 
 def quantize_per_channel(W: torch.Tensor, bits: int = 8):
-    q_max  = 2**(bits - 1) - 1
-    scale  = W.abs().amax(dim=1, keepdim=True) / q_max
-    x_q    = torch.clamp(torch.round(W / scale), -q_max, q_max).to(torch.int8)
-    x_dq   = scale * x_q.float()
-    return x_q, x_dq, scale
-
-
+    q_max = 2**(bits - 1) - 1
+    scale = W.abs().amax(dim=1, keepdim=True) / q_max
+    x_q   = torch.clamp(torch.round(W / scale), -q_max, q_max).to(torch.int8)
+    return x_q, scale * x_q.float(), scale
 
 
 def quantize_per_group(W: torch.Tensor, bits: int = 4, group_size: int = 128):
     out, inp = W.shape
     assert inp % group_size == 0
-    q_max  = 2**(bits - 1) - 1
-    W_g    = W.view(out, inp // group_size, group_size)
-    scale  = W_g.abs().amax(dim=-1, keepdim=True) / q_max
-    x_q    = torch.clamp(torch.round(W_g / scale), -q_max, q_max).to(torch.int8)
-    x_dq   = (scale * x_q.float()).view(out, inp)
+    q_max = 2**(bits - 1) - 1
+    W_g   = W.view(out, inp // group_size, group_size)
+    scale = W_g.abs().amax(dim=-1, keepdim=True) / q_max
+    x_q   = torch.clamp(torch.round(W_g / scale), -q_max, q_max).to(torch.int8)
+    x_dq  = (scale * x_q.float()).view(out, inp)
     return x_q.view(out, inp), x_dq, scale.squeeze(-1)
 
 
-
-
 W = torch.randn(4096, 4096)
-_, dq_t, _ = quantize_per_tensor(W, bits=8)
-_, dq_c, _ = quantize_per_channel(W, bits=8)
-_, dq_g, _ = quantize_per_group(W, bits=4, group_size=128)
-
-
 def rmse(a, b): return (a - b).pow(2).mean().sqrt().item()
-print(f"per-tensor  RMSE={rmse(W, dq_t):.4f}")  # ~0.0252
-print(f"per-channel RMSE={rmse(W, dq_c):.4f}")  # ~0.0087
-print(f"per-group   RMSE={rmse(W, dq_g):.4f}")  # ~0.0031
+
+print(f"per-tensor  RMSE={rmse(W, quantize_per_tensor(W, 8)[1]):.4f}")   # ~0.0252
+print(f"per-channel RMSE={rmse(W, quantize_per_channel(W, 8)[1]):.4f}")  # ~0.0087
+print(f"per-group   RMSE={rmse(W, quantize_per_group(W, 4, 128)[1]):.4f}")  # ~0.0031
 ```
 
+Per-group at INT4 beats per-channel at INT8 on RMSE — the granularity knob can recover bits. But notice every recipe so far quantizes weights, not activations. That's not a coincidence: activations are dynamic, so a per-group activation scale must be computed at runtime, which forces the GEMM into a mixed-precision (FP16 × INT8) accumulation and erases the entire INT8 tensor-core throughput benefit. Per-tensor is the only granularity that fuses cleanly into a pure INT8 matmul, which is why W8A8 production deployments use per-channel weights but per-tensor activations.
+
+Granularity decides *how many* scales we compute. The next question is *how* we compute each one.
 
 ---
 
+## 6. How do we pick the range?
 
-### Practice Question
+*Min/max, percentile, MSE, KL — what does each method actually optimize, and what does it cost?*
 
-
-**Q — What granularity is typically used for weights vs. activations, and why do they differ?**
-
-
-<details>
-<summary>💡 Hints</summary>
-
-
-<div style="background:#fdffb6;border:1px solid #fcd34d;border-radius:8px;padding:14px 16px;margin-top:8px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
-<strong>Hint 1:</strong> Think about <em>when</em> the scale is computed — offline (once, before deployment) vs. at runtime (every forward pass). Which gives you freedom to use per-group without overhead?<br><br>
-<strong>Hint 2:</strong> In W8A8, if the activation scale is stored in FP16 and the activation values are INT8, what dtype must the GEMM accumulation actually use? What does that mean for the integer tensor-core benefit?
-</div>
-</details>
-
-
-<details>
-<summary>✅ Answer</summary>
-
-
-<div style="background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-top:8px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
-
-
-<strong>Weights: per-group (g=32, 64, or 128) — the standard for all W4 deployments.</strong>
-
-
-<p style="margin-top:8px;">Weights are static. You compute group scales once offline and store them alongside the quantized values. At inference, loading the scales costs a few cache-line fetches — negligible. Per-group isolates outlier channels and dramatically reduces reconstruction error vs. per-channel at INT4. g=128 is the standard default; g=32 is used when maximum accuracy is needed at the cost of ~1.5% more metadata.</p>
-
-
-<strong>Activations: per-tensor (in practice for W8A8).</strong>
-
-
-<p>Activations are dynamic — they change with every input token. Computing per-group or per-channel scales at runtime means extra reads/writes to store group scales for every token, and since the scale is FP16 and the activation is INT8, the GEMM must apply the scale in FP16 during accumulation — you cannot issue a pure INT8 GEMM. You get INT8-packed storage but FP16 arithmetic, losing the entire throughput benefit of INT8 tensor cores. Per-tensor uses one scale per tensor, fused as a single multiply, and is compatible with pure INT8 GEMM accumulation.</p>
-
-
-</div>
-</details>
-
-
----
-
-
-## 6. Calibration Range Methods
-
-
-*Granularity decides how many scales you compute — but what rule do you use to pick each $[x_\text{min}, x_\text{max}]$ in the first place?*
-
-
-The scale formula $s = (x_\text{max} - x_\text{min}) / (2^b - 1)$ takes a range as input. Different methods for choosing that range make very different accuracy–clipping tradeoffs.
-
-
-### Overview
-
+The scale formula $s = (x_\text{max} - x_\text{min}) / (2^b - 1)$ takes a range as input, but we have not yet said where that range comes from. Different rules make very different clipping–rounding tradeoffs.
 
 <div style="display:flex;gap:14px;margin:20px 0;flex-wrap:wrap;font-family:system-ui,sans-serif;font-size:13px;">
-  <div style="flex:1;min-width:200px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;border-left:3px solid #94a3b8;padding-left:8px;">Min/Max</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
+  <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #d1d5db;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;">Min/Max</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;font-size:12px;">
       <li>Range = [min(x), max(x)]</li>
-      <li>✓ No calibration data needed</li>
-      <li>✗ One outlier blows up the scale</li>
-      <li>✗ Worst accuracy at INT4</li>
+      <li>No calibration data needed</li>
+      <li>One outlier blows up the scale</li>
+      <li>Worst at INT4</li>
     </ul>
   </div>
-  <div style="flex:1;min-width:200px;background:#eff6ff;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;border-left:3px solid #3b82f6;padding-left:8px;">Percentile</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
-      <li>Range = [p%, 100−p%] of values</li>
-      <li>✓ Clips tails, robust to outliers</li>
-      <li>✗ Hyperparameter p to tune</li>
+  <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #a0c4ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#1e3a8a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;">Percentile</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;font-size:12px;">
+      <li>Range = [p%, 100−p%]</li>
+      <li>Clips tails, robust to outliers</li>
+      <li>Hyperparameter $\alpha$ to tune</li>
       <li>Needs calibration set</li>
     </ul>
   </div>
-  <div style="flex:1;min-width:200px;background:#f5f3ff;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;border-left:3px solid #7c3aed;padding-left:8px;">MSE</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
+  <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #bdb2ff;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#4c1d95;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;">MSE</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;font-size:12px;">
       <li>Minimize $\mathbb{E}[(x - \hat{x})^2]$</li>
-      <li>✓ Optimal grid spacing</li>
-      <li>✗ Requires calibration data</li>
-      <li>✗ Costlier (grid search)</li>
+      <li>Optimal grid spacing</li>
+      <li>Requires calibration set</li>
+      <li>Costs a 1D grid search</li>
     </ul>
   </div>
-  <div style="flex:1;min-width:200px;background:#f0fdf4;border:1px solid #caffbf;border-radius:8px;padding:16px;">
-    <div style="font-weight:700;color:#14532d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;border-left:3px solid #16a34a;padding-left:8px;">KL Divergence</div>
-    <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:5px;color:#334155;font-size:12px;">
-      <li>Minimize KL(P‖Q) over clipped dist.</li>
-      <li>✓ Preserves distribution shape</li>
-      <li>✗ Requires calibration data</li>
-      <li>✗ Costlier (histogram + search)</li>
+  <div style="flex:1;min-width:200px;background:#fffffc;border:1px solid #86efac;border-radius:8px;padding:16px;">
+    <div style="font-weight:700;color:#14532d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-size:11px;">KL Divergence</div>
+    <ul style="margin:0;padding-left:14px;color:#1e293b;line-height:1.7;font-size:12px;">
+      <li>Minimize KL(P‖Q)</li>
+      <li>Preserves distribution shape</li>
+      <li>Requires calibration set</li>
+      <li>Histogram + 1D search</li>
     </ul>
   </div>
 </div>
 
+### Min/max: the lazy default
 
----
+*Why does min/max get away with it for weights but fail on activations?*
 
-
-### Min/Max
-
-
-The range is taken directly from the observed minimum and maximum of the tensor (or calibration batch):
-
-
-$$
-x_\text{min} = \min(x), \qquad x_\text{max} = \max(x)
-$$
-
-
-The scale covers every value exactly — zero clipping error. But one outlier (e.g. a weight at 5.0 while 99% of values are in [−0.3, 0.3]) sets a coarse grid that crushes the majority of values into a few bins. Min/max is the default for **weight-only** scenarios where no calibration data is available and the alternative is complexity with no accuracy gain worth measuring.
-
+The range is taken straight from the data: $x_\text{min} = \min(x)$, $x_\text{max} = \max(x)$. Zero clipping error, no calibration step. The catch is that one outlier — say a weight at 5.0 in a tensor whose 99% bulk lives in $[-0.3, 0.3]$ — sets a coarse grid that crushes all the small values into a handful of bins. Min/max wins when the distribution is well-behaved or when no calibration data is available; it loses when tails are heavy.
 
 > **Works for weights, risky for activations.** Weight distributions are stable across inputs and rarely have pathological outliers. Activation ranges shift with every token — a single calibration batch with an extreme input inflates the scale permanently.
 {: .prompt-warning }
 
+### Percentile: clip the tails, keep the bulk
 
----
+*If a few values are wrecking the grid, what if we just throw them out?*
 
+Use the $\alpha$-th and $(1-\alpha)$-th percentiles as the range, and clamp anything outside to those endpoints before quantizing. Common settings: $\alpha = 0.001$ (clip 0.1% per tail) or $\alpha = 0.0001$ for smoother distributions.
 
-### Percentile
-
-
-Instead of the absolute extremes, use the $\alpha$-th and $(1{-}\alpha)$-th percentiles:
-
-
-$$
-x_\text{min} = \text{percentile}(x,\ \alpha), \qquad x_\text{max} = \text{percentile}(x,\ 1 - \alpha)
-$$
-
-
-Values outside the clipped range are **clamped** to $x_\text{min}$ or $x_\text{max}$ before quantization. Common choices: $\alpha = 0.001$ (clip 0.1% per tail) or $\alpha = 0.0001$ for smoother activations. Lower $\alpha$ → less clipping, closer to min/max. Higher $\alpha$ → more clipping, finer grid for the bulk of the distribution.
-
-
-<!-- Percentile clipping diagram -->
 <svg viewBox="0 0 600 170" xmlns="http://www.w3.org/2000/svg"
      style="width:100%;max-width:640px;display:block;margin:18px auto;font-family:system-ui,sans-serif;background:#fffffc;border-radius:10px;border:1px solid #e2e8f0;">
 
-
-  <!-- Bell curve fill -->
   <path d="M 40,130 C 60,128 85,122 110,112 C 135,100 155,83 175,65 C 190,51 205,41 220,35 C 235,29 248,27 260,26 C 272,27 285,29 300,35 C 315,41 330,51 345,65 C 365,83 385,100 410,112 C 435,122 460,128 480,130"
-        fill="#e2e8f0" fill-opacity="0.6" stroke="none"/>
+        fill="#a0c4ff" fill-opacity="0.35" stroke="none"/>
 
-
-  <!-- Clipped tails (filled red) -->
   <path d="M 40,130 C 60,128 85,122 110,112 C 120,106 128,100 135,94 L 135,130 Z"
         fill="#ffadad" fill-opacity="0.7"/>
   <path d="M 385,94 C 392,100 400,106 410,112 C 435,122 460,128 480,130 L 480,130 L 385,130 Z"
         fill="#ffadad" fill-opacity="0.7"/>
 
-
-  <!-- Bell curve stroke -->
   <path d="M 40,130 C 60,128 85,122 110,112 C 135,100 155,83 175,65 C 190,51 205,41 220,35 C 235,29 248,27 260,26 C 272,27 285,29 300,35 C 315,41 330,51 345,65 C 365,83 385,100 410,112 C 435,122 460,128 480,130"
         fill="none" stroke="#1e293b" stroke-width="2"/>
 
+  <line x1="135" y1="20" x2="135" y2="135" stroke="#7f1d1d" stroke-width="1.8" stroke-dasharray="5,3"/>
+  <line x1="385" y1="20" x2="385" y2="135" stroke="#7f1d1d" stroke-width="1.8" stroke-dasharray="5,3"/>
 
-  <!-- Clip boundary lines -->
-  <line x1="135" y1="20" x2="135" y2="135" stroke="#be123c" stroke-width="1.8" stroke-dasharray="5,3"/>
-  <line x1="385" y1="20" x2="385" y2="135" stroke="#be123c" stroke-width="1.8" stroke-dasharray="5,3"/>
+  <text x="135" y="15" text-anchor="middle" font-size="11" font-weight="700" fill="#7f1d1d">α percentile</text>
+  <text x="385" y="15" text-anchor="middle" font-size="11" font-weight="700" fill="#7f1d1d">(1−α) percentile</text>
 
-
-  <!-- Labels -->
-  <text x="135" y="15" text-anchor="middle" font-size="11" font-weight="700" fill="#be123c">α percentile</text>
-  <text x="385" y="15" text-anchor="middle" font-size="11" font-weight="700" fill="#be123c">(1−α) percentile</text>
-
-
-  <!-- Tail labels -->
-  <text x="87"  y="148" text-anchor="middle" font-size="10" fill="#be123c" font-weight="600">clipped</text>
-  <text x="432" y="148" text-anchor="middle" font-size="10" fill="#be123c" font-weight="600">clipped</text>
-
-
-  <!-- Kept region label -->
+  <text x="87"  y="148" text-anchor="middle" font-size="10" fill="#7f1d1d" font-weight="600">clipped</text>
+  <text x="432" y="148" text-anchor="middle" font-size="10" fill="#7f1d1d" font-weight="600">clipped</text>
   <text x="260" y="148" text-anchor="middle" font-size="10" fill="#14532d" font-weight="600">quantized range</text>
 
-
-  <!-- Baseline -->
   <line x1="30" y1="132" x2="495" y2="132" stroke="#94a3b8" stroke-width="1"/>
 </svg>
 
+The rose tails get clamped — those few values pay a clipping error — and in exchange the bulk of the distribution gets a much finer grid. It's a knob, not a method: pick $\alpha$ too low and we are back to min/max; pick it too high and we clip the body of the distribution. So the natural follow-up is — can we set $\alpha$ automatically?
 
-The red tails are clamped — clipping error for those values, but the bulk of the distribution gets a much finer grid.
+### MSE: balance clipping against rounding
 
+*What value of $\alpha$ minimizes the actual reconstruction error?*
 
----
-
-
-### MSE Calibration
-
-
-Search for the clipping bound $\alpha$ that minimizes mean-squared reconstruction error over a calibration set:
-
+Search for the $\alpha$ that minimizes mean squared error over a calibration set:
 
 $$
 \alpha^* = \arg\min_\alpha\ \mathbb{E}\!\left[\left(x - Q_\alpha(x)\right)^2\right]
 $$
 
+where $Q_\alpha$ is the quantize→dequantize round-trip with range clipped to $[-\alpha, \alpha]$. In practice this is a one-dimensional grid search over $\alpha$ on a small batch (~128–512 samples). The MSE decomposes into two opposing terms:
 
-where $Q_\alpha$ is the quantize→dequantize round-trip with range clipped to $[-\alpha, \alpha]$ (symmetric) or $[x_\text{min}^\alpha, x_\text{max}^\alpha]$ (asymmetric). In practice this is a one-dimensional grid search over $\alpha$ on a small calibration batch (~128–512 samples).
-
-
-The MSE decomposes into two opposing terms:
-
-
-$$
-\text{MSE} = \underbrace{\text{clipping error}}_{\text{values outside } \alpha \text{ are clamped}} + \underbrace{\text{rounding error}}_{\text{values inside are rounded to grid}}
-$$
-
-
-Shrinking $\alpha$ reduces rounding error (finer grid for the same range) but increases clipping error. The optimal $\alpha^*$ is where the two are balanced.
-
-
-<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;font-size:13px;">
-  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6366f1;margin-bottom:8px;">MSE · Clipping vs. Rounding Decomposition</div>
-
+<div style="background:#fffffc;border:1px solid #e2e8f0;border-left:3px solid #bdb2ff;border-radius:0 6px 6px 0;padding:14px 18px;margin:16px 0;font-family:system-ui,sans-serif;">
+  <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#4c1d95;margin-bottom:8px;">MSE · clipping vs. rounding decomposition</div>
 
 $$
 \text{MSE}(\alpha) = \underbrace{\frac{\alpha^2}{3 \cdot (2^b - 1)^2}}_{\text{rounding}} \cdot N_\text{in} \;+\; \underbrace{\sum_{|x_i| > \alpha} (|x_i| - \alpha)^2}_{\text{clipping}}
 $$
 
-
   <div style="font-size:12px;color:#64748b;margin-top:10px;line-height:1.7;">
-    $N_\text{in}$ — number of values inside the clipped range &nbsp;·&nbsp; $b$ — bit-width &nbsp;·&nbsp; $\alpha$ — clip threshold (symmetric case)
+    $N_\text{in}$ — values inside the clipped range · $b$ — bit-width · $\alpha$ — clip threshold (symmetric)
   </div>
 </div>
 
+The two terms pull in opposite directions: shrinking $\alpha$ tightens the grid (less rounding) but pushes more values into the clip region (more clipping). Their crossover is the optimum, and the grid search just finds it.
 
 ```python
 import torch
 
-
 def mse_calibrate(x: torch.Tensor, bits: int = 8, steps: int = 200):
-    """Search for the symmetric clip threshold alpha* that minimises MSE."""
+    """Search for the symmetric clip threshold alpha* that minimizes MSE."""
     q_max = 2**(bits - 1) - 1
     best_alpha, best_mse = x.abs().max().item(), float("inf")
-
 
     for i in range(1, steps + 1):
         alpha = x.abs().max().item() * i / steps
         scale = alpha / q_max
-        x_clipped = x.clamp(-alpha, alpha)
-        x_q  = torch.clamp(torch.round(x_clipped / scale), -q_max, q_max)
-        x_dq = scale * x_q.float()
-        mse  = (x - x_dq).pow(2).mean().item()
+        x_q   = torch.clamp(torch.round(x.clamp(-alpha, alpha) / scale), -q_max, q_max)
+        mse   = (x - scale * x_q.float()).pow(2).mean().item()
         if mse < best_mse:
             best_mse, best_alpha = mse, alpha
-
-
     return best_alpha
 ```
 
+This is the default in **GPTQ**, **AWQ**, and most post-training pipelines: cheap (one forward pass plus a search), reliably better than min/max, no tuning required from the user.
 
-MSE calibration is the default in **GPTQ**, **AWQ**, and most post-training quantization pipelines because it is cheap (one forward pass + grid search) and reliably outperforms min/max.
+### KL divergence: preserve the shape
 
+*When the distribution itself carries the signal, what does element-wise error miss?*
 
----
-
-
-### KL Divergence Calibration
-
-
-Instead of minimising reconstruction error per element, minimise the information loss between the original distribution $P$ and the quantized distribution $Q$:
-
+Instead of element-wise reconstruction error, minimize the information loss between the original distribution $P$ and the quantized distribution $Q$:
 
 $$
 \alpha^* = \arg\min_\alpha\ D_\text{KL}(P \,\|\, Q_\alpha)
-= \arg\min_\alpha \sum_i P(i) \log \frac{P(i)}{Q_\alpha(i)}
+= \arg\min_\alpha \sum_i P(i) \log \frac{P(i)}{Q_\alpha(i)}.
 $$
 
-
-Both $P$ and $Q_\alpha$ are estimated as histograms over the calibration set. $Q_\alpha$ bins the clipped-and-quantized values and renormalizes them back to the original histogram's support. KL divergence penalizes missing probability mass more strongly than MSE — if the quantized distribution puts zero probability where the original has nonzero probability, the divergence is infinite.
-
-
-**When KL beats MSE:** distributions with heavy tails where a few large values carry most of the signal (e.g., softmax attention scores before masking). KL preserves the relative shape of the distribution, not just element-wise reconstruction. TensorRT's legacy INT8 calibration uses KL by default for this reason.
-
+Both $P$ and $Q_\alpha$ are histograms over the calibration data. KL penalizes missing probability mass strongly — if $Q$ assigns zero where $P$ has non-zero, the divergence is infinite. That makes KL the right choice for distributions where the *shape* matters more than per-element fidelity. Softmax attention scores are the textbook example: a few large values carry most of the signal, and we want to preserve their relative weight, not minimize their absolute reconstruction error. TensorRT's legacy INT8 calibration uses KL by default for exactly this reason.
 
 ```python
-import torch
 import numpy as np
 
-
-def kl_calibrate(x: torch.Tensor, bits: int = 8, num_bins: int = 2048, steps: int = 100):
-    """Find the clip threshold alpha* that minimises KL(P||Q)."""
+def kl_calibrate(x, bits=8, num_bins=2048, steps=100):
+    """Find alpha* that minimizes KL(P || Q) over a calibration tensor."""
     x_np = x.float().numpy().ravel()
     abs_max = np.abs(x_np).max()
-
-
-    hist, bin_edges = np.histogram(x_np, bins=num_bins, range=(-abs_max, abs_max))
-    hist = hist.astype(np.float64)
-    hist /= hist.sum()                   # reference distribution P
-
+    hist, edges = np.histogram(x_np, bins=num_bins, range=(-abs_max, abs_max))
+    P = hist.astype(np.float64); P /= P.sum()
+    centers = 0.5 * (edges[:-1] + edges[1:])
 
     best_alpha, best_kl = abs_max, float("inf")
-
-
     for i in range(steps, 0, -1):
         alpha = abs_max * i / steps
-        num_q_levels = 2**bits - 1
-
-
-        # Clip P to [-alpha, alpha] and renormalize → P_clipped
-        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        mask = np.abs(bin_centers) <= alpha
-        p_clipped = hist.copy()
-        p_clipped[~mask] = 0.0
-        if p_clipped.sum() < 1e-12:
-            continue
-        p_clipped /= p_clipped.sum()
-
-
-        # Quantize bin centers, build Q histogram
-        scale = alpha / (num_q_levels // 2)
-        q_indices = np.clip(np.round(bin_centers[mask] / scale).astype(int),
-                            -(num_q_levels // 2), num_q_levels // 2)
-        q_hist = np.zeros(num_bins)
-        for idx, q in zip(np.where(mask)[0], q_indices):
-            q_hist[idx] += p_clipped[idx]
-        # Spread quantized mass back over bins that map to the same level
-        q_dist = np.zeros(num_bins)
-        for level in np.unique(q_indices):
-            bins_at_level = np.where(mask)[0][q_indices == level]
-            if len(bins_at_level):
-                q_dist[bins_at_level] = q_hist[bins_at_level].sum() / len(bins_at_level)
-        if q_dist.sum() < 1e-12:
-            continue
-        q_dist /= q_dist.sum()
-
-
-        # KL — only where both distributions have mass
-        nz = (p_clipped > 0) & (q_dist > 0)
-        kl = (p_clipped[nz] * np.log(p_clipped[nz] / q_dist[nz])).sum()
+        levels = 2**bits - 1
+        scale  = alpha / (levels // 2)
+        mask   = np.abs(centers) <= alpha
+        Pc = P.copy(); Pc[~mask] = 0
+        if Pc.sum() < 1e-12: continue
+        Pc /= Pc.sum()
+        q_idx = np.clip(np.round(centers[mask] / scale).astype(int),
+                        -(levels // 2), levels // 2)
+        Q = np.zeros(num_bins)
+        for level in np.unique(q_idx):
+            bins = np.where(mask)[0][q_idx == level]
+            if len(bins): Q[bins] = Pc[bins].sum() / len(bins)
+        if Q.sum() < 1e-12: continue
+        Q /= Q.sum()
+        nz = (Pc > 0) & (Q > 0)
+        kl = (Pc[nz] * np.log(Pc[nz] / Q[nz])).sum()
         if kl < best_kl:
             best_kl, best_alpha = kl, alpha
-
-
     return best_alpha
 ```
 
+### Comparing the four
 
----
-
-
-### Comparison
-
+*Which method should we reach for first?*
 
 <div style="overflow-x:auto;margin:16px 0;">
-<table style="border-collapse:collapse;width:100%;font-size:13px;font-family:system-ui,sans-serif;">
+<table style="border-collapse:collapse;width:100%;min-width:560px;font-size:13px;font-family:system-ui,sans-serif;">
   <thead>
     <tr style="background:#f1f5f9;">
-      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Method</th>
-      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Calibration data</th>
-      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Outlier robustness</th>
-      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Cost</th>
-      <th style="padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;">Typical use</th>
+      <th style="padding:8px 10px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:600;">Method</th>
+      <th style="padding:8px 10px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:600;">Calib data</th>
+      <th style="padding:8px 10px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:600;">Robustness</th>
+      <th style="padding:8px 10px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:600;">Cost</th>
+      <th style="padding:8px 10px;border:1px solid #e2e8f0;text-align:left;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:600;">Typical use</th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">Min/Max</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">None</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#7f1d1d;">Poor</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Trivial</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Static weights, fast prototyping</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;font-weight:600;">Min/Max</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">None</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;color:#7f1d1d;">Poor</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Trivial</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Static weights, fast prototyping</td>
     </tr>
-    <tr style="background:#a0c4ff20;">
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">Percentile</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Small batch</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#78350f;">Good</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Low</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Activations with known tail behavior</td>
+    <tr style="background:#a0c4ff40;">
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;font-weight:600;">Percentile</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Small batch</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;color:#78350f;">Good</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Low</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Activations with known tails</td>
     </tr>
-    <tr style="background:#bdb2ff20;">
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">MSE</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Small batch</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#14532d;">Best</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Medium (grid search)</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">W4 weights — GPTQ, AWQ default</td>
+    <tr style="background:#bdb2ff40;">
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;font-weight:600;">MSE</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Small batch</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;color:#14532d;">Best</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Medium (grid search)</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;font-weight:600;">W4 weights, GPTQ/AWQ default</td>
     </tr>
     <tr style="background:#caffbf40;">
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;font-weight:600;">KL Divergence</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Small batch</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;color:#14532d;">Best</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Medium (histogram)</td>
-      <td style="padding:7px 12px;border:1px solid #e2e8f0;">Activations — TensorRT INT8 default</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;font-weight:600;">KL Divergence</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Small batch</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;color:#14532d;">Best</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Medium (histogram)</td>
+      <td style="padding:7px 10px;border:1px solid #e2e8f0;">Activations, TensorRT INT8 default</td>
     </tr>
   </tbody>
 </table>
 </div>
 
-
-> **Practical recommendation.** For W4 weight quantization, MSE with a 128–512 sample calibration set is the standard. For activation quantization (W8A8), KL divergence or percentile with a representative calibration set outperforms min/max significantly at INT8. Min/max is only competitive for static weights at INT8 where outliers are mild.
+> **Practical recommendation.** For W4 weight quantization, MSE on a 128–512 sample calibration set is the standard. For W8A8 activation quantization, KL or percentile on a representative calibration set beats min/max significantly. Min/max is competitive only for static weights at INT8 with mild outliers.
 {: .prompt-tip }
 
+To make the difference concrete: imagine an activation tensor with 99.9% of values in $[-1, 1]$ and 0.1% of outliers reaching ±8.0. Min/max sets the INT8 range to $[-8, 8]$, giving a grid spacing of $16/255 \approx 0.063$ — every value in the bulk loses two bits of effective precision so the few outliers don't clip. MSE or KL clips the tails to roughly ±1; the 0.1% pay a clipping error of at most 7, contributing $0.001 \times 49 = 0.049$ to the mean squared error, while the 99.9% inside get a grid spacing of $2/255 \approx 0.008$ — eight times finer. The bulk is what shows up in metrics, so MSE and KL win by a wide margin.
 
 ---
 
-
-### Practice Question
-
-
-**Q — You are calibrating an LLM activation tensor for INT8. The distribution has 99.9% of values in [−1, 1] and 0.1% of outliers up to ±8.0. Which method is worst and which is best, and why?**
-
-
-<details>
-<summary>💡 Hints</summary>
-
-
-<div style="background:#fdffb6;border:1px solid #fcd34d;border-radius:8px;padding:14px 16px;margin-top:8px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
-<strong>Hint 1:</strong> With min/max, what does the scale become? With 256 INT8 levels spread over [−8, 8], what is the grid spacing for values in [−1, 1]?<br><br>
-<strong>Hint 2:</strong> Percentile, MSE, and KL would all clip the 0.1% tail to ±~1. What error do they pay for those clipped values, and how does that compare to the error saved for the 99.9%?
-</div>
-</details>
-
-
-<details>
-<summary>✅ Answer</summary>
-
-
-<div style="background:#fffffc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-top:8px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.7;">
-
-
-<strong>Worst: min/max. Best: MSE or KL (roughly tied here).</strong>
-
-
-<p style="margin-top:8px;">Min/max sets range [−8, 8]. INT8 has 256 levels over 16 units: grid spacing = 16/255 ≈ 0.063. For the 99.9% of values in [−1, 1], every value is quantized with up to 0.031 error — tolerable. But the 0.1% outliers at ±8.0 pull the scale coarse enough that the bulk of the distribution effectively loses ~2 bits of resolution.</p>
-
-
-<p>Percentile/MSE/KL all clip the 0.1% tail to roughly ±1. The clipping error on those 0.1% values is at most 7.0 (absolute), but the contribution to mean error is small (0.001 × 7 = 0.007). In exchange, the grid spacing drops to 2/255 ≈ 0.008 — an 8× finer grid for the 99.9% majority. The net MSE is dramatically lower.</p>
-
-
-<p>KL divergence is particularly suited here: it assigns infinite penalty to wiping out probability mass, so it clips exactly to the point where the tail mass becomes negligible relative to the core distribution — typically very close to the MSE optimum for this type of distribution.</p>
-
-
-</div>
-</details>
-
+We started with a 28 GB FP32 model and ended with a stack of independent knobs — bit-width, target (W/A/KV), symmetric vs. asymmetric, granularity, and range method — that compose into a single deployment recipe. The decision flow is short: confirm the model fits at the target batch and sequence including KV cache; quantize weights with per-group symmetric and MSE calibration; only quantize activations or KV cache when memory or compute demands force it; and never touch embeddings or the LM head. Everything else in this curriculum — GPTQ, AWQ, SmoothQuant, FP8, QAT — is a refinement of one of those five knobs.
 
 ---
-
-
-## Putting It All Together
-
-
-<div style="background:#fffffc;border:1px solid #d1d5db;border-radius:8px;padding:16px;margin:20px 0;font-family:system-ui,sans-serif;font-size:13px;">
-  <div style="display:flex;flex-direction:column;gap:12px;">
-
-
-    <div style="display:flex;gap:12px;align-items:flex-start;">
-      <div style="background:#a0c4ff;color:#1e3a8a;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0;margin-top:1px;">1</div>
-      <div>
-        <div style="font-weight:700;color:#1e293b;margin-bottom:2px;">Quantization targets linear layers — everything else is not worth touching</div>
-        <div style="color:#64748b;font-size:12px;">Over 95% of parameters and FLOPs live in the weight matrices of attention and FFN projections. LayerNorm, SiLU, softmax, and embeddings are left in FP16/BF16. Quantization is a compression scheme for matmul operands, not a general model transformation.</div>
-      </div>
-    </div>
-
-
-    <div style="display:flex;gap:12px;align-items:flex-start;">
-      <div style="background:#a0c4ff;color:#1e3a8a;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0;margin-top:1px;">2</div>
-      <div>
-        <div style="font-weight:700;color:#1e293b;margin-bottom:2px;">W4A16 guarantees memory reduction — it does not guarantee a compute speedup</div>
-        <div style="color:#64748b;font-size:12px;">In W4A16, weights are stored as INT4 but dequantized to BF16 before the GEMM. The matmul runs on BF16 tensor cores — not INT4. The only win is fewer bytes streamed from HBM. At batch=1 (arithmetic intensity ≈ 1 FLOP/byte) that translates to 2–3× decode throughput. At batch≥32 the workload is compute-bound and weight compression contributes near zero. The roofline tells you which regime you are in.</div>
-      </div>
-    </div>
-
-
-    <div style="display:flex;gap:12px;align-items:flex-start;">
-      <div style="background:#a0c4ff;color:#1e3a8a;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0;margin-top:1px;">3</div>
-      <div>
-        <div style="font-weight:700;color:#1e293b;margin-bottom:2px;">Symmetric for weights, asymmetric for activations — for different reasons</div>
-        <div style="color:#64748b;font-size:12px;">Weight tensors are roughly zero-centered after training, so a single scale ($z=0$) wastes no grid levels and dequantization reduces to one multiply. Activations after ReLU span $[0, x_\text{max}]$ — a symmetric grid leaves half the integer range empty. Asymmetric adds a zero-point to shift the grid, recovering those wasted levels at the cost of one extra subtract per dequantization.</div>
-      </div>
-    </div>
-
-
-    <div style="display:flex;gap:12px;align-items:flex-start;">
-      <div style="background:#a0c4ff;color:#1e3a8a;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0;margin-top:1px;">4</div>
-      <div>
-        <div style="font-weight:700;color:#1e293b;margin-bottom:2px;">Granularity is the accuracy knob — per-group is the practical default for weights</div>
-        <div style="color:#64748b;font-size:12px;">Per-tensor lets one outlier inflate the scale for every weight in a layer. Per-group (g=128) isolates that outlier to 128 values — dramatically tighter error bounds at the cost of a small metadata overhead. For activations, per-tensor is the only practical choice: dynamic per-group scales cannot be fused into a pure INT8 GEMM.</div>
-      </div>
-    </div>
-
-
-    <div style="display:flex;gap:12px;align-items:flex-start;">
-      <div style="background:#a0c4ff;color:#1e3a8a;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0;margin-top:1px;">5</div>
-      <div>
-        <div style="font-weight:700;color:#1e293b;margin-bottom:2px;">The range-selection method matters as much as the bit-width</div>
-        <div style="color:#64748b;font-size:12px;">Min/max is free but vulnerable to a single outlier. Percentile clips tails with a tunable threshold. MSE finds the clip bound that balances rounding vs. clipping error — the standard for W4 weight calibration (GPTQ, AWQ). KL divergence minimises information loss between the original and quantized distributions — TensorRT's INT8 default for activations. For activations with 0.1% outliers at 8× the typical magnitude, the switch from min/max to MSE/KL can recover 2 bits of effective precision.</div>
-      </div>
-    </div>
-
-
-  </div>
-</div>
-
-
----
-
 
 ## References
 
-
-- Maarten Grootendorst, [A Visual Guide to Quantization](https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-quantization) — approachable visual walkthrough of quantization concepts; good companion read for the math in Section 4.
-- NVIDIA TensorRT, [Post-Training Quantization Using Calibration](https://archive.docs.nvidia.com/tensorrt/tensorrt-861/developer-guide/index.html#enable_int8_c) — TensorRT 8.6 documentation on INT8 calibration, including the KL-divergence calibration algorithm.
+- Maarten Grootendorst, [A Visual Guide to Quantization](https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-quantization) — approachable visual walkthrough; good companion read for section 4.
+- NVIDIA TensorRT, [Post-Training Quantization Using Calibration](https://archive.docs.nvidia.com/tensorrt/tensorrt-861/developer-guide/index.html#enable_int8_c) — TensorRT 8.6 documentation on INT8 calibration, including the KL-divergence algorithm.
 - Hao Wu et al., [Integer Quantization for Deep Learning Inference: Principles and Empirical Evaluation](https://arxiv.org/abs/2004.09602) — NVIDIA paper covering quantization parameter choices including calibration range methods across vision, speech, and language models.
-
-
-
 
 
