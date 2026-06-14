@@ -323,7 +323,7 @@ The algorithm in full — note line 8, where all the work happens:
 *You call `quantize()` with a handful of parameters — which ones move accuracy, and what breaks if you leave the defaults?*
 
 
-> **Illustrative, not copy-paste.** The calibration-data format `GPTQModel.quantize()` expects varies by version — check it against your installed `gptqmodel`. For runnable code see [Lab 2 — GPTQ &amp; AWQ under the hood](/posts/lab2-gptq-awq-underthehood/).
+> **Illustrative, not copy-paste.** The calibration-data format `GPTQModel.quantize()` expects varies by version — check it against your installed `gptqmodel`. For runnable code see [Lab 2 — GPTQ &amp; AWQ under the hood](/posts/gptq-awq-underthehood/).
 {: .prompt-info }
 
 
@@ -555,7 +555,7 @@ $$
 *Same question we asked of GPTQ — which AutoAWQ settings actually move accuracy?*
 
 
-> **Illustrative, not copy-paste.** The `quantize()` signature and `calib_data` handling differ across AutoAWQ versions — verify against your installed `autoawq`. For runnable code see [Lab 2](/posts/lab2-gptq-awq-underthehood/).
+> **Illustrative, not copy-paste.** The `quantize()` signature and `calib_data` handling differ across AutoAWQ versions — verify against your installed `autoawq`. For runnable code see [Lab 2](/posts/gptq-awq-underthehood/).
 {: .prompt-info }
 
 
